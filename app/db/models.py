@@ -1,0 +1,187 @@
+from datetime import date, datetime
+from enum import StrEnum
+from typing import Any
+
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    MetaData,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+NAMING_CONVENTION = {
+    "ix": "ix_%(column_0_label)s",
+    "uq": "uq_%(table_name)s_%(column_0_name)s",
+    "ck": "ck_%(table_name)s_%(constraint_name)s",
+    "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
+    "pk": "pk_%(table_name)s",
+}
+
+
+class Base(DeclarativeBase):
+    metadata = MetaData(naming_convention=NAMING_CONVENTION)
+    type_annotation_map = {
+        datetime: DateTime(timezone=True),
+        date: Date,
+        dict[str, Any]: JSONB,
+    }
+
+
+class UserRole(StrEnum):
+    OWNER = "owner"  # руководитель, создал компанию
+    MANAGER = "manager"  # получает сводки, видит все объекты
+    FOREMAN = "foreman"  # прораб, шлёт отчёты с объекта
+
+
+class EntryKind(StrEnum):
+    TEXT = "text"
+    VOICE = "voice"
+    AUDIO = "audio"
+    VIDEO_NOTE = "video_note"
+    PHOTO = "photo"
+    VIDEO = "video"
+    DOCUMENT = "document"
+
+
+AUDIO_KINDS = frozenset({EntryKind.VOICE, EntryKind.AUDIO, EntryKind.VIDEO_NOTE})
+
+
+class EntryStatus(StrEnum):
+    PENDING = "pending"  # ждёт воркера (скачать файл, расшифровать, описать фото)
+    PROCESSING = "processing"
+    DONE = "done"
+    FAILED = "failed"
+
+
+class Company(Base):
+    """Арендатор: к компании в дальнейшем привязывается подписка."""
+
+    __tablename__ = "companies"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(255))
+    timezone: Mapped[str] = mapped_column(String(64), default="Europe/Moscow")
+    invite_code: Mapped[str] = mapped_column(String(32), unique=True)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    sites: Mapped[list["Site"]] = relationship(back_populates="company")
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    tg_id: Mapped[int] = mapped_column(BigInteger, unique=True)
+    company_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id", ondelete="SET NULL"))
+    role: Mapped[str] = mapped_column(String(16), default=UserRole.FOREMAN)
+    full_name: Mapped[str] = mapped_column(String(255), default="")
+    username: Mapped[str | None] = mapped_column(String(64))
+    # Объект, к которому сейчас привязываются входящие сообщения прораба
+    current_site_id: Mapped[int | None] = mapped_column(ForeignKey("sites.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    company: Mapped[Company | None] = relationship(lazy="joined")
+    current_site: Mapped["Site | None"] = relationship(lazy="joined")
+
+    @property
+    def is_manager(self) -> bool:
+        return self.role in (UserRole.OWNER, UserRole.MANAGER)
+
+
+class Site(Base):
+    """Строительный объект."""
+
+    __tablename__ = "sites"
+    __table_args__ = (UniqueConstraint("company_id", "name", name="uq_sites_company_name"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"))
+    name: Mapped[str] = mapped_column(String(255))
+    address: Mapped[str | None] = mapped_column(String(500))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    company: Mapped[Company] = relationship(back_populates="sites")
+
+
+class Entry(Base):
+    """Одно сообщение прораба: текст, голосовое, фото и т.д.
+
+    Таблица одновременно служит очередью задач для воркера
+    (status / attempts / next_attempt_at / locked_at).
+    """
+
+    __tablename__ = "entries"
+    __table_args__ = (
+        UniqueConstraint("tg_chat_id", "tg_message_id", name="uq_entries_tg_message"),
+        Index("ix_entries_site_date", "site_id", "work_date"),
+        Index("ix_entries_queue", "status", "next_attempt_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"))
+    site_id: Mapped[int | None] = mapped_column(ForeignKey("sites.id", ondelete="SET NULL"))
+    # Без каскада: архив сообщений нужен и после ухода прораба из компании
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    kind: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(16), default=EntryStatus.PENDING)
+
+    work_date: Mapped[date]
+    sent_at: Mapped[datetime]  # время отправки по данным Telegram (UTC)
+    taken_at: Mapped[datetime | None]  # время съёмки из EXIF, если фото прислали файлом
+
+    tg_chat_id: Mapped[int] = mapped_column(BigInteger)
+    tg_message_id: Mapped[int] = mapped_column(BigInteger)
+    media_group_id: Mapped[str | None] = mapped_column(String(64))
+
+    tg_file_id: Mapped[str | None] = mapped_column(String(255))
+    tg_file_unique_id: Mapped[str | None] = mapped_column(String(64))
+    file_name: Mapped[str | None] = mapped_column(String(255))
+    mime_type: Mapped[str | None] = mapped_column(String(128))
+    duration: Mapped[int | None] = mapped_column(Integer)
+    # Путь относительно MEDIA_ROOT и хеш — для доказательной базы в спорах
+    file_path: Mapped[str | None] = mapped_column(String(512))
+    file_size: Mapped[int | None] = mapped_column(BigInteger)
+    file_sha256: Mapped[str | None] = mapped_column(String(64))
+
+    text: Mapped[str | None] = mapped_column(Text)  # текст сообщения или подпись к медиа
+    transcript: Mapped[str | None] = mapped_column(Text)
+    photo_description: Mapped[str | None] = mapped_column(Text)
+
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime | None]
+    locked_at: Mapped[datetime | None]
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    company: Mapped[Company] = relationship()
+    site: Mapped[Site | None] = relationship()
+    user: Mapped[User] = relationship()
+
+
+class DailyReport(Base):
+    """Сформированный LLM отчёт по объекту за день (последняя версия)."""
+
+    __tablename__ = "daily_reports"
+    __table_args__ = (UniqueConstraint("site_id", "work_date", name="uq_daily_reports_site_date"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    site_id: Mapped[int] = mapped_column(ForeignKey("sites.id", ondelete="CASCADE"))
+    work_date: Mapped[date]
+    data: Mapped[dict[str, Any]]
+    model: Mapped[str] = mapped_column(String(128))
+    entries_count: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
+
+    site: Mapped[Site] = relationship()
