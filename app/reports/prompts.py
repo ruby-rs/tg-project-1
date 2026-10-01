@@ -76,8 +76,46 @@ def format_entry(entry: Entry, tz_name: str) -> str | None:
     )
 
 
+def format_album(entries: Sequence[Entry], tz_name: str) -> str:
+    """Альбом — одна строка журнала: подпись есть только у одного фото, а относится ко всем."""
+    first = entries[0]
+    ids = ", ".join(f"#{e.id}" for e in entries)
+    parts: list[str] = []
+    if caption := next((e.text for e in entries if e.text), None):
+        parts.append(f"подпись: «{caption.strip()}»")
+    descriptions = [
+        f"#{e.id} — {e.photo_description.strip()}" for e in entries if e.photo_description
+    ]
+    if descriptions:
+        parts.append("на фото: " + "; ".join(descriptions))
+    if not parts:
+        parts.append("без подписи")
+    time = to_local(first.sent_at, tz_name).strftime("%H:%M")
+    author = first.user.full_name if first.user else "прораб"
+    return f"{ids} [{time}] {author}, альбом ({len(entries)} шт.): " + "; ".join(parts)
+
+
+def group_albums(entries: Sequence[Entry]) -> list[list[Entry]]:
+    """Собирает фото одного альбома в группу на месте первого из них."""
+    groups: list[list[Entry]] = []
+    albums: dict[str, list[Entry]] = {}
+    for entry in entries:
+        if entry.media_group_id is None:
+            groups.append([entry])
+        elif entry.media_group_id in albums:
+            albums[entry.media_group_id].append(entry)
+        else:
+            albums[entry.media_group_id] = [entry]
+            groups.append(albums[entry.media_group_id])
+    return groups
+
+
 def report_user_prompt(site: Site, work_date: date, entries: Sequence[Entry], tz_name: str) -> str:
-    lines = [line for e in entries if (line := format_entry(e, tz_name))]
+    lines = []
+    for group in group_albums(entries):
+        line = format_album(group, tz_name) if len(group) > 1 else format_entry(group[0], tz_name)
+        if line:
+            lines.append(line)
     header = [f"Объект: {site.name}"]
     if site.address:
         header.append(f"Адрес: {site.address}")

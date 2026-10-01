@@ -10,10 +10,12 @@ from app.config import Settings
 from app.db.session import create_engine, create_sessionmaker
 from app.services.llm import LLMClient
 from app.services.photos import PhotoDescriber
+from app.services.reports import ReportService
 from app.services.storage import LocalFileStorage
 from app.services.transcription import build_transcriber
 from app.worker.processor import EntryProcessor
-from app.worker.runner import Worker
+from app.worker.reports import ReportQueue
+from app.worker.runner import EntryQueue, run_queue
 
 log = logging.getLogger(__name__)
 
@@ -32,14 +34,13 @@ async def run_worker(settings: Settings) -> None:
         transcriber=build_transcriber(settings),
         describer=PhotoDescriber(llm) if settings.llm_vision_model else None,
     )
-    worker = Worker(
+    entries = EntryQueue(
         sessionmaker,
         processor,
-        concurrency=settings.worker_concurrency,
-        poll_interval=settings.worker_poll_interval,
         max_attempts=settings.worker_max_attempts,
         stale_after=settings.worker_stale_after,
     )
+    reports = ReportQueue(sessionmaker, bot, ReportService(llm))
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -47,7 +48,21 @@ async def run_worker(settings: Settings) -> None:
         loop.add_signal_handler(sig, stop.set)
 
     try:
-        await worker.run(stop)
+        # Отдельные очереди: долгий запрос к LLM не задерживает расшифровку голосовых
+        await asyncio.gather(
+            run_queue(
+                entries,
+                stop,
+                concurrency=settings.worker_concurrency,
+                poll_interval=settings.worker_poll_interval,
+            ),
+            run_queue(
+                reports,
+                stop,
+                concurrency=settings.report_concurrency,
+                poll_interval=settings.worker_poll_interval,
+            ),
+        )
     finally:
         await bot.session.close()
         await engine.dispose()

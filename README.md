@@ -7,6 +7,7 @@ Telegram-бот для строительных компаний. Прорабы
 
 Архитектура и дорожная карта — в [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 Установка на сервер (Debian 13) — в [docs/DEPLOY.md](docs/DEPLOY.md).
+Персональные данные и 152-ФЗ — в [docs/PERSONAL_DATA.md](docs/PERSONAL_DATA.md).
 
 **Стек:** Python 3.12, aiogram 3, PostgreSQL 16, SQLAlchemy 2 + Alembic,
 Whisper (faster-whisper или OpenAI-совместимый API), любая LLM с OpenAI-совместимым API, Docker.

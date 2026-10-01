@@ -21,6 +21,18 @@ class Settings(BaseSettings):
     # Сообщения, отправленные до этого часа, относятся к предыдущему рабочему дню
     work_day_start_hour: int = Field(default=0, ge=0, le=23)
     log_level: str = "INFO"
+    # Хранилище состояний диалогов (FSM); пусто — в памяти, сбрасывается при рестарте
+    redis_url: str | None = None
+    # Ошибки в Sentry или совместимый сервис (GlitchTip); пусто — выключено
+    sentry_dsn: str | None = None
+    sentry_environment: str = "production"
+
+    # --- Персональные данные (152-ФЗ) ---
+    # Оператор ПДн для текста согласия, например «ООО Ромашка, ИНН 7700000000, г. Москва, ...»
+    pd_operator: str | None = None
+    privacy_policy_url: str | None = None
+    # Куда писать для отзыва согласия и удаления данных: e-mail или @username
+    support_contact: str | None = None
 
     # --- Расшифровка голосовых ---
     transcriber: TranscriberBackend = TranscriberBackend.API
@@ -47,13 +59,24 @@ class Settings(BaseSettings):
 
     # --- Воркер ---
     worker_concurrency: int = Field(default=4, ge=1)
+    report_concurrency: int = Field(default=1, ge=1)  # одновременных запросов к LLM
     worker_poll_interval: float = 2.0
     worker_max_attempts: int = 5
     worker_stale_after: int = 600  # сек: задача «зависла», можно брать повторно
 
     @model_validator(mode="after")
     def _empty_to_none(self) -> "Settings":
-        for name in ("whisper_api_base_url", "llm_base_url", "llm_project", "llm_vision_model"):
+        for name in (
+            "whisper_api_base_url",
+            "llm_base_url",
+            "llm_project",
+            "llm_vision_model",
+            "pd_operator",
+            "privacy_policy_url",
+            "support_contact",
+            "redis_url",
+            "sentry_dsn",
+        ):
             if getattr(self, name) == "":
                 setattr(self, name, None)
         return self

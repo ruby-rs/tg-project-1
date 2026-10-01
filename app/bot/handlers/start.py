@@ -3,20 +3,23 @@ from html import escape
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 from aiogram.utils.deep_linking import create_start_link
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.filters import IsManager
-from app.bot.keyboards import sites_keyboard
+from app.bot.handlers.sites import set_current_site
+from app.bot.keyboards import InviteLink, invite_keyboard, sites_keyboard
 from app.bot.states import Registration
 from app.config import Settings
-from app.db.models import User, UserRole
+from app.db.models import Company, User, UserRole
 from app.db.repositories import CompanyRepo, SiteRepo
 
 router = Router(name="start")
 
-INVITE_PREFIX = "inv_"
+INVITE_PREFIX = "inv_"  # приглашение в компанию
+SITE_INVITE_PREFIX = "site_"  # приглашение сразу на объект
+BAD_INVITE = "Ссылка-приглашение недействительна. Попросите у руководителя новую."
 
 HELP_TEXT = """\
 <b>Как пользоваться</b>
@@ -33,7 +36,8 @@ HELP_TEXT = """\
 /object — выбрать объект
 /new_object — добавить объект
 /report — отчёт за день
-/invite — ссылка-приглашение для прорабов (для руководителя)
+/invite — пригласить прораба на объект (для руководителя)
+/privacy — персональные данные и отзыв согласия
 /cancel — отменить текущее действие"""
 
 
@@ -41,50 +45,85 @@ HELP_TEXT = """\
 async def cmd_start(
     message: Message,
     command: CommandObject,
+    bot: Bot,
     user: User,
     session: AsyncSession,
     state: FSMContext,
 ) -> None:
+    await process_start(bot, message.chat.id, command.args or "", user, session, state)
+
+
+async def _join_company(bot: Bot, chat_id: int, user: User, company: Company) -> bool:
+    """Подключает пользователя к компании прорабом. False — он уже в другой компании."""
+    if user.company_id is not None and user.company_id != company.id:
+        await bot.send_message(
+            chat_id,
+            f"Вы уже состоите в компании «{escape(user.company.name)}». "
+            "Перейти в другую компанию пока можно только через поддержку.",
+        )
+        return False
+    if user.company_id is None:
+        user.company = company
+        user.role = UserRole.FOREMAN
+    return True
+
+
+async def process_start(
+    bot: Bot, chat_id: int, args: str, user: User, session: AsyncSession, state: FSMContext
+) -> None:
     await state.clear()
-    args = command.args or ""
+    sites = SiteRepo(session)
+
+    if args.startswith(SITE_INVITE_PREFIX):
+        site = await sites.get_by_invite(args.removeprefix(SITE_INVITE_PREFIX))
+        if site is None:
+            await bot.send_message(chat_id, BAD_INVITE)
+            return
+        if not await _join_company(bot, chat_id, user, site.company):
+            return
+        await session.flush()
+        await sites.add_member(site.id, user.id)
+        text = await set_current_site(session, user, site)
+        await bot.send_message(
+            chat_id, f"👷 Вы подключены к компании «{escape(site.company.name)}».\n{text}"
+        )
+        return
 
     if args.startswith(INVITE_PREFIX):
         company = await CompanyRepo(session).get_by_invite(args.removeprefix(INVITE_PREFIX))
         if company is None:
-            await message.answer(
-                "Ссылка-приглашение недействительна. Попросите у руководителя новую."
-            )
+            await bot.send_message(chat_id, BAD_INVITE)
             return
-        if user.company_id is not None and user.company_id != company.id:
-            await message.answer(
-                f"Вы уже состоите в компании «{escape(user.company.name)}». "
-                "Перейти в другую компанию пока можно только через поддержку."
-            )
+        if not await _join_company(bot, chat_id, user, company):
             return
-        if user.company_id is None:
-            user.company = company
-            user.role = UserRole.FOREMAN
-        sites = await SiteRepo(session).list_active(company.id)
+        await session.flush()
+        my_sites = await sites.list_for_user(user)
         text = f"👷 Вы подключены к компании «{escape(company.name)}».\n\n"
-        if sites:
-            await message.answer(
+        if my_sites:
+            await bot.send_message(
+                chat_id,
                 text + "Выберите объект, на котором вы сегодня работаете:",
-                reply_markup=sites_keyboard(sites, user.current_site_id),
+                reply_markup=sites_keyboard(my_sites, user.current_site_id),
             )
         else:
-            await message.answer(text + "Объектов пока нет — добавьте первый: /new_object")
+            await bot.send_message(
+                chat_id,
+                text + "Вас пока не добавили ни на один объект. Попросите у руководителя "
+                "ссылку на объект или добавьте свой: /new_object",
+            )
         return
 
     if user.company_id is not None:
-        await message.answer(HELP_TEXT)
+        await bot.send_message(chat_id, HELP_TEXT)
         return
 
     await state.set_state(Registration.company_name)
-    await message.answer(
+    await bot.send_message(
+        chat_id,
         "Здравствуйте! Я собираю отчёты прорабов с объектов: фото, голосовые и текст "
         "превращаю в структурированный дневной отчёт.\n\n"
         "Если вы <b>руководитель</b> — напишите название компании, и я её зарегистрирую.\n"
-        "Если вы <b>прораб</b> — попросите у руководителя ссылку-приглашение."
+        "Если вы <b>прораб</b> — попросите у руководителя ссылку-приглашение.",
     )
 
 
@@ -112,11 +151,31 @@ async def register_company(
 
 
 @router.message(Command("invite"), IsManager())
-async def cmd_invite(message: Message, user: User, bot: Bot) -> None:
-    link = await create_start_link(bot, INVITE_PREFIX + user.company.invite_code)
+async def cmd_invite(message: Message, user: User, session: AsyncSession) -> None:
+    sites = await SiteRepo(session).list_for_user(user)
     await message.answer(
-        f"Перешлите эту ссылку прорабам — после перехода они попадут в вашу компанию:\n\n{link}"
+        "Куда пригласить прораба? Ссылка на объект сразу даёт доступ к нему; "
+        "уже подключённому прорабу её можно прислать, чтобы добавить ещё объект.",
+        reply_markup=invite_keyboard(sites),
     )
+
+
+@router.callback_query(InviteLink.filter(), IsManager())
+async def on_invite_link(
+    call: CallbackQuery, callback_data: InviteLink, bot: Bot, user: User, session: AsyncSession
+) -> None:
+    if callback_data.site_id == 0:
+        payload, target = INVITE_PREFIX + user.company.invite_code, "в компанию"
+    else:
+        site = await SiteRepo(session).get_for_user(user, callback_data.site_id)
+        if site is None:
+            await call.answer("Объект не найден", show_alert=True)
+            return
+        payload, target = SITE_INVITE_PREFIX + site.invite_code, f"на объект «{escape(site.name)}»"
+    link = await create_start_link(bot, payload)
+    await call.answer()
+    if call.message:
+        await call.message.answer(f"Ссылка-приглашение {target} — перешлите её прорабу:\n\n{link}")
 
 
 @router.message(Command("help"))

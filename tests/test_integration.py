@@ -16,24 +16,37 @@ from aiogram import Bot
 from aiogram.client.session.base import BaseSession
 from aiogram.methods import (
     AnswerCallbackQuery,
+    EditMessageReplyMarkup,
     EditMessageText,
     GetFile,
+    GetMe,
     SendChatAction,
     SendMessage,
     SetMessageReaction,
     TelegramMethod,
 )
 from aiogram.types import Chat, File, Message, Update
+from aiogram.types import User as TgUser
 from sqlalchemy import select
 
 from app.bot.app import build_dispatcher
-from app.db.models import Company, DailyReport, Entry, EntryKind, EntryStatus, Site, User
+from app.db.models import (
+    Company,
+    DailyReport,
+    Entry,
+    EntryKind,
+    EntryStatus,
+    ReportJob,
+    Site,
+    User,
+)
 from app.db.repositories import EntryRepo
 from app.services.llm import LLMClient
 from app.services.reports import ReportService
 from app.services.storage import LocalFileStorage
 from app.worker.processor import EntryProcessor
-from app.worker.runner import Worker
+from app.worker.reports import ReportQueue
+from app.worker.runner import EntryQueue
 from tests.test_services import fake_openai
 
 TG_USER_ID = 555
@@ -47,6 +60,8 @@ class MockedSession(BaseSession):
 
     async def make_request(self, bot: Bot, method: TelegramMethod[Any], timeout: int | None = None):
         self.requests.append(method)
+        if isinstance(method, GetMe):
+            return TgUser(id=123456, is_bot=True, first_name="Bot", username="prorab_test_bot")
         if isinstance(method, GetFile):
             return File(file_id=method.file_id, file_unique_id="u", file_path=method.file_id)
         if isinstance(method, SendMessage):
@@ -58,7 +73,7 @@ class MockedSession(BaseSession):
             )
         if isinstance(method, SetMessageReaction | SendChatAction | AnswerCallbackQuery):
             return True
-        if isinstance(method, EditMessageText):
+        if isinstance(method, EditMessageText | EditMessageReplyMarkup):
             return True
         raise NotImplementedError(type(method).__name__)
 
@@ -154,10 +169,11 @@ def bot(tg: MockedSession) -> Bot:
 
 async def test_full_flow(sessionmaker, settings, bot, tg, tmp_path):
     llm_client = fake_openai([REPORT_JSON])
-    dp = build_dispatcher(settings, sessionmaker, ReportService(LLMClient(llm_client, "m")))
+    dp = build_dispatcher(settings, sessionmaker)
 
     # 1. Регистрация руководителя и компании
     await dp.feed_update(bot, make_update(text="/start"))
+    await dp.feed_update(bot, callback_update("consent:accept"))
     await dp.feed_update(bot, make_update(text="ООО Стройка"))
     # 2. Сообщение до выбора объекта сохраняется «без объекта»
     await dp.feed_update(bot, make_update(text="Привезли арматуру"))
@@ -205,7 +221,7 @@ async def test_full_flow(sessionmaker, settings, bot, tg, tmp_path):
     # 5. Воркер: скачивает в архив и расшифровывает
     transcriber = FakeTranscriber()
     storage = LocalFileStorage(tmp_path / "media")
-    worker = Worker(sessionmaker, EntryProcessor(bot, storage, transcriber))
+    worker = EntryQueue(sessionmaker, EntryProcessor(bot, storage, transcriber))
     for entry_id in await worker.claim(10):
         await worker.handle(entry_id)
 
@@ -217,10 +233,18 @@ async def test_full_flow(sessionmaker, settings, bot, tg, tmp_path):
     assert storage.path(voice_entry.file_path).read_bytes() == b"OggS-fake-voice"
     assert voice_entry.file_path.endswith(f"_{voice_entry.id}.ogg")
     assert len(photo_entry.file_sha256) == 64
-    assert f"🎙 <i>{transcriber.text}</i>" in tg.sent_texts()
+    assert any(t.startswith(f"🎙 <i>{transcriber.text}</i>") for t in tg.sent_texts())
 
-    # 6. Отчёт
+    # 6. Отчёт: бот ставит задачу, воркер собирает и присылает
     await dp.feed_update(bot, make_update(text="/report"))
+    assert "⏳ Формирую отчёт по «ЖК Северный»" in tg.sent_texts()[-1]
+    await dp.feed_update(bot, make_update(text="/report"))
+    assert "уже формируется" in tg.sent_texts()[-1]
+
+    reports = ReportQueue(sessionmaker, bot, ReportService(LLMClient(llm_client, "m")))
+    job_ids = await reports.claim(10)
+    assert len(job_ids) == 1  # повторный /report не создал вторую задачу
+    await reports.handle(job_ids[0])
     report_text = tg.sent_texts()[-1]
     assert "ЖК Северный" in report_text
     assert "Бетонирование перекрытия — <b>12 м³</b>" in report_text
@@ -237,8 +261,9 @@ async def test_full_flow(sessionmaker, settings, bot, tg, tmp_path):
 
 
 async def test_duplicate_update_is_ignored(sessionmaker, settings, bot):
-    dp = build_dispatcher(settings, sessionmaker, ReportService(LLMClient(fake_openai([]), "m")))
+    dp = build_dispatcher(settings, sessionmaker)
     await dp.feed_update(bot, make_update(text="/start"))
+    await dp.feed_update(bot, callback_update("consent:accept"))
     await dp.feed_update(bot, make_update(text="ООО Стройка"))
     update = make_update(text="Сообщение")
     await dp.feed_update(bot, update)
@@ -247,26 +272,56 @@ async def test_duplicate_update_is_ignored(sessionmaker, settings, bot):
         assert len(list(await s.scalars(select(Entry)))) == 1
 
 
-async def test_foreman_joins_by_invite_and_selects_site(sessionmaker, settings, bot, tg):
+async def test_foreman_sees_only_own_sites(sessionmaker, settings, bot, tg):
     async with sessionmaker() as s:
         company = Company(name="ООО Стройка", invite_code="CODE123")
         s.add(company)
         await s.flush()
-        s.add(Site(company_id=company.id, name="Склад"))
+        s.add_all(
+            [
+                Site(company_id=company.id, name="Склад", invite_code="SKLAD"),
+                Site(company_id=company.id, name="Офис", invite_code="OFIS"),
+            ]
+        )
         await s.commit()
 
-    dp = build_dispatcher(settings, sessionmaker, ReportService(LLMClient(fake_openai([]), "m")))
-    await dp.feed_update(bot, make_update(text="/start inv_CODE123"))
-    assert "Вы подключены к компании «ООО Стройка»" in tg.sent_texts()[-1]
+    dp = build_dispatcher(settings, sessionmaker)
 
-    async with sessionmaker() as s:
-        site = await s.scalar(select(Site))
-    await dp.feed_update(bot, callback_update(f"site:{site.id}"))
+    # Приглашение в компанию без объекта: объектов прораб пока не видит
+    await dp.feed_update(bot, make_update(text="/start inv_CODE123"))
+    await dp.feed_update(bot, callback_update("consent:accept"))
+    assert "Вы подключены к компании «ООО Стройка»" in tg.sent_texts()[-1]
+    assert "Вас пока не добавили ни на один объект" in tg.sent_texts()[-1]
+
+    # Приглашение на объект: доступ и текущий объект
+    await dp.feed_update(bot, make_update(text="/start site_SKLAD"))
     assert "Текущий объект: <b>Склад</b>" in tg.sent_texts()[-1]
 
+    tg.requests.clear()
+    await dp.feed_update(bot, make_update(text="/object"))
+    keyboard = tg.requests[-1].reply_markup.inline_keyboard
+    assert [row[0].text for row in keyboard] == ["✅ Склад", "➕ Новый объект"]
+
+    # Чужой объект нельзя выбрать, даже подделав callback
     async with sessionmaker() as s:
+        office = await s.scalar(select(Site).where(Site.name == "Офис"))
         user = await s.scalar(select(User))
-    assert user.role == "foreman" and user.current_site_id == site.id
+    await dp.feed_update(bot, callback_update(f"site:{office.id}"))
+    assert any(
+        isinstance(r, AnswerCallbackQuery) and r.text == "Объект не найден" for r in tg.requests
+    )
+    assert user.role == "foreman"
+
+
+async def test_manager_creates_site_invite(sessionmaker, settings, bot, tg):
+    dp = build_dispatcher(settings, sessionmaker)
+    await register_owner_with_site(dp, bot, "Склад")
+    async with sessionmaker() as s:
+        site = await s.scalar(select(Site))
+
+    await dp.feed_update(bot, make_update(text="/invite"))
+    await dp.feed_update(bot, callback_update(f"invite:{site.id}"))
+    assert f"start=site_{site.invite_code}" in tg.sent_texts()[-1]
 
 
 async def _seed_entry(sessionmaker, **kw) -> int:
@@ -315,7 +370,7 @@ async def test_claim_skips_locked_and_respects_backoff(sessionmaker):
 async def test_worker_retries_then_fails(sessionmaker, bot, tg, tmp_path):
     entry_id = await _seed_entry(sessionmaker)
     processor = EntryProcessor(bot, LocalFileStorage(tmp_path), FailingTranscriber())
-    worker = Worker(sessionmaker, processor, max_attempts=2)
+    worker = EntryQueue(sessionmaker, processor, max_attempts=2)
 
     assert await worker.claim(10) == [entry_id]
     await worker.handle(entry_id)
@@ -336,3 +391,148 @@ async def test_worker_retries_then_fails(sessionmaker, bot, tg, tmp_path):
         entry = await s.get(Entry, entry_id)
     assert entry.status == EntryStatus.FAILED
     assert "Не получилось расшифровать" in tg.sent_texts()[-1]
+
+
+def edited_update(message_id: int, **message_fields: Any) -> Update:
+    message = {
+        "message_id": message_id,
+        "date": int(datetime.now(UTC).timestamp()),
+        "edit_date": int(datetime.now(UTC).timestamp()),
+        "chat": {"id": TG_USER_ID, "type": "private"},
+        "from": {"id": TG_USER_ID, "is_bot": False, "first_name": "Иван"},
+        **message_fields,
+    }
+    return Update.model_validate({"update_id": next(_msg_ids), "edited_message": message})
+
+
+async def register_owner_with_site(dp, bot, site_name: str = "ЖК Северный") -> None:
+    await dp.feed_update(bot, make_update(text="/start"))
+    await dp.feed_update(bot, callback_update("consent:accept"))
+    await dp.feed_update(bot, make_update(text="ООО Стройка"))
+    await dp.feed_update(bot, make_update(text="/new_object"))
+    await dp.feed_update(bot, make_update(text=site_name))
+
+
+async def test_transcript_fix_by_reply_and_edited_message(
+    sessionmaker, settings, bot, tg, tmp_path
+):
+    dp = build_dispatcher(settings, sessionmaker)
+    await register_owner_with_site(dp, bot)
+
+    text_update = make_update(text="Залили 10 кубов")
+    await dp.feed_update(bot, text_update)
+    voice = {"file_id": "voice-file", "file_unique_id": "v1", "duration": 3}
+    await dp.feed_update(bot, make_update(voice=voice))
+
+    worker = EntryQueue(
+        sessionmaker,
+        EntryProcessor(bot, LocalFileStorage(tmp_path), FakeTranscriber("Залили 12 кубов")),
+    )
+    for entry_id in await worker.claim(10):
+        await worker.handle(entry_id)
+
+    async with sessionmaker() as s:
+        voice_entry = await s.scalar(select(Entry).where(Entry.kind == EntryKind.VOICE))
+    assert voice_entry.transcript_message_id is not None
+    assert "ответьте на это сообщение" in tg.sent_texts()[-1]
+
+    # Прораб отвечает на расшифровку исправленным текстом
+    bot_message = {
+        "message_id": voice_entry.transcript_message_id,
+        "date": int(datetime.now(UTC).timestamp()),
+        "chat": {"id": TG_USER_ID, "type": "private"},
+        "from": {"id": 123456, "is_bot": True, "first_name": "Bot"},
+        "text": "🎙 Залили 12 кубов",
+    }
+    await dp.feed_update(bot, make_update(text="Залили 21 куб", reply_to_message=bot_message))
+    assert "Расшифровка исправлена" in tg.sent_texts()[-1]
+
+    # Прораб редактирует текстовое сообщение
+    await dp.feed_update(bot, edited_update(text_update.message.message_id, text="Залили 11 кубов"))
+
+    async with sessionmaker() as s:
+        entries = list(await s.scalars(select(Entry).order_by(Entry.id)))
+    assert len(entries) == 2  # ответ-исправление не создаёт новую запись
+    text_entry, voice_entry = entries
+    assert text_entry.text == "Залили 11 кубов" and text_entry.edited_at is not None
+    assert voice_entry.transcript == "Залили 21 куб"
+    assert voice_entry.transcript_original == "Залили 12 кубов"
+
+
+async def test_report_waits_for_unprocessed_entries(sessionmaker, settings, bot, tg):
+    dp = build_dispatcher(settings, sessionmaker)
+    await register_owner_with_site(dp, bot)
+    voice = {"file_id": "voice-file", "file_unique_id": "v1", "duration": 3}
+    await dp.feed_update(bot, make_update(voice=voice))  # ещё не расшифровано
+    await dp.feed_update(bot, make_update(text="/report"))
+
+    llm_client = fake_openai([REPORT_JSON])
+    reports = ReportQueue(sessionmaker, bot, ReportService(LLMClient(llm_client, "m")))
+    [job_id] = await reports.claim(10)
+    await reports.handle(job_id)
+
+    async with sessionmaker() as s:
+        job = await s.get(ReportJob, job_id)
+    assert job.status == EntryStatus.PENDING and job.attempts == 0
+    assert job.next_attempt_at is not None
+    assert llm_client.chat.completions.calls == []  # LLM не вызывали
+
+
+async def test_report_failure_is_reported_after_attempts(sessionmaker, settings, bot, tg):
+    dp = build_dispatcher(settings, sessionmaker)
+    await register_owner_with_site(dp, bot)
+    await dp.feed_update(bot, make_update(text="Залили 10 кубов"))
+    await dp.feed_update(bot, make_update(text="/report"))
+
+    reports = ReportQueue(
+        sessionmaker,
+        bot,
+        ReportService(LLMClient(fake_openai(["мусор"] * 4), "m")),
+        max_attempts=1,
+    )
+    [job_id] = await reports.claim(10)
+    await reports.handle(job_id)
+
+    async with sessionmaker() as s:
+        job = await s.get(ReportJob, job_id)
+    assert job.status == EntryStatus.FAILED
+    assert "Не удалось сформировать отчёт" in tg.sent_texts()[-1]
+
+
+async def test_nothing_works_without_consent(sessionmaker, settings, bot, tg):
+    settings.pd_operator = "ООО Ромашка, ИНН 7700000000"
+    dp = build_dispatcher(settings, sessionmaker)
+
+    await dp.feed_update(bot, make_update(text="/start"))
+    assert "Согласие на обработку персональных данных" in tg.sent_texts()[-1]
+    assert "Оператор: ООО Ромашка" in tg.sent_texts()[-1]
+
+    # Без согласия сообщение не сохраняется
+    await dp.feed_update(bot, make_update(text="ООО Стройка"))
+    assert "После согласия пришлите сообщение ещё раз" in tg.sent_texts()[-1]
+
+    await dp.feed_update(bot, callback_update("consent:accept"))
+    assert "напишите название компании" in tg.sent_texts()[-1]
+    async with sessionmaker() as s:
+        user = await s.scalar(select(User))
+        assert user.consent_at is not None
+        assert await s.scalar(select(Entry)) is None
+
+    # Отзыв согласия снова блокирует бота
+    await dp.feed_update(bot, callback_update("consent:revoke"))
+    await dp.feed_update(bot, make_update(text="/report"))
+    assert "Согласие на обработку персональных данных" in tg.sent_texts()[-1]
+
+
+async def test_invite_link_survives_consent(sessionmaker, settings, bot, tg):
+    async with sessionmaker() as s:
+        company = Company(name="ООО Стройка", invite_code="CODE123")
+        s.add(company)
+        await s.flush()
+        s.add(Site(company_id=company.id, name="Склад", invite_code="SKLAD"))
+        await s.commit()
+
+    dp = build_dispatcher(settings, sessionmaker)
+    await dp.feed_update(bot, make_update(text="/start site_SKLAD"))
+    await dp.feed_update(bot, callback_update("consent:accept"))
+    assert "Текущий объект: <b>Склад</b>" in tg.sent_texts()[-1]

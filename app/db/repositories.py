@@ -1,7 +1,6 @@
-import secrets
 from datetime import date, timedelta
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import Select, and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
@@ -11,9 +10,12 @@ from app.db.models import (
     DailyReport,
     Entry,
     EntryStatus,
+    ReportJob,
     Site,
+    SiteMember,
     User,
     UserRole,
+    new_invite_code,
 )
 
 
@@ -47,7 +49,7 @@ class CompanyRepo:
         self.session = session
 
     async def create(self, name: str, timezone: str, owner: User) -> Company:
-        company = Company(name=name, timezone=timezone, invite_code=secrets.token_urlsafe(9))
+        company = Company(name=name, timezone=timezone, invite_code=new_invite_code())
         self.session.add(company)
         await self.session.flush()
         owner.company = company
@@ -62,29 +64,44 @@ class SiteRepo:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def create(self, company_id: int, name: str) -> Site:
+    async def create(self, company_id: int, name: str, creator: User) -> Site:
         site = Site(company_id=company_id, name=name)
         self.session.add(site)
         await self.session.flush()
+        await self.add_member(site.id, creator.id)
         return site
 
-    async def get(self, company_id: int, site_id: int) -> Site | None:
-        return await self.session.scalar(
-            select(Site).where(Site.id == site_id, Site.company_id == company_id)
+    async def add_member(self, site_id: int, user_id: int) -> None:
+        await self.session.execute(
+            pg_insert(SiteMember).values(site_id=site_id, user_id=user_id).on_conflict_do_nothing()
         )
+
+    async def get_by_invite(self, code: str) -> Site | None:
+        return await self.session.scalar(
+            select(Site)
+            .options(joinedload(Site.company))
+            .where(Site.invite_code == code, Site.is_active.is_(True))
+        )
+
+    def _visible_to(self, user: User) -> Select[tuple[Site]]:
+        """Руководитель видит все объекты компании, прораб — только свои."""
+        stmt = select(Site).where(Site.company_id == user.company_id, Site.is_active.is_(True))
+        if not user.is_manager:
+            stmt = stmt.join(
+                SiteMember, and_(SiteMember.site_id == Site.id, SiteMember.user_id == user.id)
+            )
+        return stmt
+
+    async def get_for_user(self, user: User, site_id: int) -> Site | None:
+        return await self.session.scalar(self._visible_to(user).where(Site.id == site_id))
+
+    async def list_for_user(self, user: User) -> list[Site]:
+        return list(await self.session.scalars(self._visible_to(user).order_by(Site.name)))
 
     async def get_by_name(self, company_id: int, name: str) -> Site | None:
         return await self.session.scalar(
             select(Site).where(Site.company_id == company_id, func.lower(Site.name) == name.lower())
         )
-
-    async def list_active(self, company_id: int) -> list[Site]:
-        result = await self.session.scalars(
-            select(Site)
-            .where(Site.company_id == company_id, Site.is_active.is_(True))
-            .order_by(Site.name)
-        )
-        return list(result)
 
 
 class EntryRepo:
@@ -109,6 +126,31 @@ class EntryRepo:
             return False
         entry.id = entry_id
         return True
+
+    async def get_by_message(self, chat_id: int, message_id: int) -> Entry | None:
+        return await self.session.scalar(
+            select(Entry).where(Entry.tg_chat_id == chat_id, Entry.tg_message_id == message_id)
+        )
+
+    async def get_by_transcript_message(self, chat_id: int, message_id: int) -> Entry | None:
+        return await self.session.scalar(
+            select(Entry).where(
+                Entry.tg_chat_id == chat_id, Entry.transcript_message_id == message_id
+            )
+        )
+
+    async def album_caption(self, chat_id: int, media_group_id: str) -> str | None:
+        """Подпись альбома: Telegram кладёт её только в одно из сообщений группы."""
+        return await self.session.scalar(
+            select(Entry.text)
+            .where(
+                Entry.tg_chat_id == chat_id,
+                Entry.media_group_id == media_group_id,
+                Entry.text.is_not(None),
+            )
+            .order_by(Entry.tg_message_id)
+            .limit(1)
+        )
 
     async def assign_unsorted(self, user_id: int, site_id: int) -> int:
         """Привязывает к объекту сообщения, присланные до выбора объекта."""
@@ -147,35 +189,69 @@ class EntryRepo:
         )
 
     async def claim_batch(self, limit: int, stale_after: int) -> list[int]:
-        """Забирает задачи в работу. SKIP LOCKED позволяет запускать несколько воркеров."""
-        ready = and_(
-            Entry.status == EntryStatus.PENDING,
-            or_(Entry.next_attempt_at.is_(None), Entry.next_attempt_at <= func.now()),
-        )
-        stale = and_(
-            Entry.status == EntryStatus.PROCESSING,
-            Entry.locked_at < func.now() - timedelta(seconds=stale_after),
-        )
-        candidates = (
-            select(Entry.id)
-            .where(or_(ready, stale))
-            .order_by(Entry.id)
-            .limit(limit)
-            .with_for_update(skip_locked=True)
-            .scalar_subquery()
-        )
-        result = await self.session.scalars(
-            update(Entry)
-            .where(Entry.id.in_(candidates))
+        return await claim_jobs(self.session, Entry, limit, stale_after)
+
+
+async def claim_jobs(
+    session: AsyncSession, model: type[Entry] | type[ReportJob], limit: int, stale_after: int
+) -> list[int]:
+    """Забирает задачи очереди в работу. SKIP LOCKED позволяет запускать несколько воркеров.
+
+    Подходят готовые задачи (pending, срок повтора наступил) и «зависшие» (processing
+    дольше stale_after секунд — например, воркер упал посреди обработки).
+    """
+    ready = and_(
+        model.status == EntryStatus.PENDING,
+        or_(model.next_attempt_at.is_(None), model.next_attempt_at <= func.now()),
+    )
+    stale = and_(
+        model.status == EntryStatus.PROCESSING,
+        model.locked_at < func.now() - timedelta(seconds=stale_after),
+    )
+    candidates = (
+        select(model.id)
+        .where(or_(ready, stale))
+        .order_by(model.id)
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+        .scalar_subquery()
+    )
+    result = await session.scalars(
+        update(model)
+        .where(model.id.in_(candidates))
+        .values(status=EntryStatus.PROCESSING, locked_at=func.now(), attempts=model.attempts + 1)
+        .returning(model.id)
+        .execution_options(synchronize_session=False)
+    )
+    return list(result)
+
+
+class ReportJobRepo:
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def enqueue(self, site_id: int, work_date: date, chat_id: int, user_id: int) -> bool:
+        """Ставит отчёт в очередь. False — такой отчёт уже формируется для этого чата."""
+        stmt = (
+            pg_insert(ReportJob)
             .values(
-                status=EntryStatus.PROCESSING,
-                locked_at=func.now(),
-                attempts=Entry.attempts + 1,
+                site_id=site_id,
+                work_date=work_date,
+                chat_id=chat_id,
+                user_id=user_id,
+                status=EntryStatus.PENDING,
+                attempts=0,
             )
-            .returning(Entry.id)
-            .execution_options(synchronize_session=False)
+            .on_conflict_do_nothing(
+                index_elements=["site_id", "work_date", "chat_id"],
+                index_where=ReportJob.status.in_([EntryStatus.PENDING, EntryStatus.PROCESSING]),
+            )
+            .returning(ReportJob.id)
         )
-        return list(result)
+        return await self.session.scalar(stmt) is not None
+
+    async def claim_batch(self, limit: int, stale_after: int) -> list[int]:
+        return await claim_jobs(self.session, ReportJob, limit, stale_after)
 
 
 class ReportRepo:

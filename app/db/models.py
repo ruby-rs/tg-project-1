@@ -1,3 +1,4 @@
+import secrets
 from datetime import date, datetime
 from enum import StrEnum
 from typing import Any
@@ -15,6 +16,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -26,6 +28,10 @@ NAMING_CONVENTION = {
     "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
     "pk": "pk_%(table_name)s",
 }
+
+
+def new_invite_code() -> str:
+    return secrets.token_urlsafe(9)
 
 
 class Base(DeclarativeBase):
@@ -88,6 +94,8 @@ class User(Base):
     username: Mapped[str | None] = mapped_column(String(64))
     # Объект, к которому сейчас привязываются входящие сообщения прораба
     current_site_id: Mapped[int | None] = mapped_column(ForeignKey("sites.id", ondelete="SET NULL"))
+    # Согласие на обработку персональных данных (152-ФЗ); None — не дано или отозвано
+    consent_at: Mapped[datetime | None]
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
     company: Mapped[Company | None] = relationship(lazy="joined")
@@ -109,9 +117,25 @@ class Site(Base):
     name: Mapped[str] = mapped_column(String(255))
     address: Mapped[str | None] = mapped_column(String(500))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Ссылка-приглашение сразу на объект: прораб попадает и в компанию, и на объект
+    invite_code: Mapped[str] = mapped_column(String(32), unique=True, default=new_invite_code)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
     company: Mapped[Company] = relationship(back_populates="sites")
+
+
+class SiteMember(Base):
+    """Прораб допущен к объекту. Руководители видят все объекты без записей здесь."""
+
+    __tablename__ = "site_members"
+
+    site_id: Mapped[int] = mapped_column(
+        ForeignKey("sites.id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
 class Entry(Base):
@@ -126,6 +150,7 @@ class Entry(Base):
         UniqueConstraint("tg_chat_id", "tg_message_id", name="uq_entries_tg_message"),
         Index("ix_entries_site_date", "site_id", "work_date"),
         Index("ix_entries_queue", "status", "next_attempt_at"),
+        Index("ix_entries_transcript_message", "tg_chat_id", "transcript_message_id"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -155,7 +180,12 @@ class Entry(Base):
     file_sha256: Mapped[str | None] = mapped_column(String(64))
 
     text: Mapped[str | None] = mapped_column(Text)  # текст сообщения или подпись к медиа
+    edited_at: Mapped[datetime | None]  # прораб отредактировал текст или подпись
     transcript: Mapped[str | None] = mapped_column(Text)
+    # Исходная расшифровка Whisper, если прораб её исправил
+    transcript_original: Mapped[str | None] = mapped_column(Text)
+    # Сообщение бота с расшифровкой: ответ на него исправляет расшифровку
+    transcript_message_id: Mapped[int | None] = mapped_column(BigInteger)
     photo_description: Mapped[str | None] = mapped_column(Text)
 
     attempts: Mapped[int] = mapped_column(Integer, default=0)
@@ -167,6 +197,39 @@ class Entry(Base):
     company: Mapped[Company] = relationship()
     site: Mapped[Site | None] = relationship()
     user: Mapped[User] = relationship()
+
+
+class ReportJob(Base):
+    """Запрос отчёта: бот ставит задачу, воркер собирает отчёт и присылает его в чат."""
+
+    __tablename__ = "report_jobs"
+    __table_args__ = (
+        Index("ix_report_jobs_queue", "status", "next_attempt_at"),
+        # Повторный /report, пока прошлый не готов, не создаёт дубль
+        Index(
+            "ux_report_jobs_active",
+            "site_id",
+            "work_date",
+            "chat_id",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'processing')"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    site_id: Mapped[int] = mapped_column(ForeignKey("sites.id", ondelete="CASCADE"))
+    work_date: Mapped[date]
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    status: Mapped[str] = mapped_column(String(16), default=EntryStatus.PENDING)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime | None]
+    locked_at: Mapped[datetime | None]
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    finished_at: Mapped[datetime | None]
+
+    site: Mapped[Site] = relationship()
 
 
 class DailyReport(Base):

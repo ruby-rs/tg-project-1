@@ -361,37 +361,19 @@ docker compose up -d --build
 ## 10. Бэкапы
 
 Архив фото — доказательная база, поэтому бэкап обязателен: и БД, и медиа.
+Для этого в репозитории есть скрипт `scripts/backup.sh`. Он делает дамп базы и
+синхронизирует медиа-архив; дампы хранятся 14 дней (переменная `KEEP_DAYS`).
 
 ```bash
-sudo mkdir -p /var/backups/prorab-bot && sudo chown deploy:deploy /var/backups/prorab-bot
-
-cat > /opt/prorab-bot/backup.sh <<'EOF'
-#!/bin/sh
-set -eu
-cd /opt/prorab-bot
-DEST=/var/backups/prorab-bot
-STAMP=$(date +%F_%H%M)
-
-# База данных
-docker compose exec -T db sh -c 'pg_dump -U "$POSTGRES_USER" -Fc "$POSTGRES_DB"' > "$DEST/db_$STAMP.dump"
-
-# Медиа: файлы только добавляются, поэтому достаточно синхронизации
-docker run --rm -v prorab-bot_media:/media:ro -v "$DEST/media":/backup alpine \
-  sh -c 'apk add --no-cache rsync >/dev/null && rsync -a /media/ /backup/'
-
-# Дампы БД храним 14 дней
-find "$DEST" -maxdepth 1 -name 'db_*.dump' -mtime +14 -delete
-EOF
-chmod +x /opt/prorab-bot/backup.sh
+mkdir -p /var/backups/prorab-bot
+/opt/prorab-bot/scripts/backup.sh      # проверочный запуск
+ls -la /var/backups/prorab-bot
 ```
-
-Имя тома `prorab-bot_media` складывается из имени каталога проекта (`prorab-bot`)
-и имени тома. Если клонировали в другой каталог, проверьте имя: `docker volume ls`.
 
 Каждую ночь в 3:30:
 
 ```bash
-(crontab -l 2>/dev/null; echo "30 3 * * * /opt/prorab-bot/backup.sh >> /var/backups/prorab-bot/backup.log 2>&1") | crontab -
+(crontab -l 2>/dev/null; echo "30 3 * * * /opt/prorab-bot/scripts/backup.sh >> /var/backups/prorab-bot/backup.log 2>&1") | crontab -
 ```
 
 > Бэкап на том же сервере не спасёт, если сервер пропадёт. Копируйте
@@ -406,6 +388,15 @@ docker compose exec -T db sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB
   < /var/backups/prorab-bot/db_ДАТА.dump
 docker compose start bot worker
 ```
+
+## Дополнительно: Redis и Sentry
+
+- **Redis** поднимается в Docker Compose автоматически (сервис `redis`, до 64 МБ памяти).
+  В нём хранится состояние диалогов: если бот перезапустится посреди регистрации или
+  создания объекта, пользователю не придётся начинать заново.
+- **Sentry** (или совместимый self-hosted GlitchTip) — сбор ошибок бота и воркера.
+  Включается строкой `SENTRY_DSN=...` в `.env`. Тексты сообщений прорабов туда не
+  отправляются.
 
 ## 11. Полезные команды
 

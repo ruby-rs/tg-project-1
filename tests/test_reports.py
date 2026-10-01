@@ -5,7 +5,7 @@ import pytest
 
 from app.bot.handlers.reports import parse_days_ago
 from app.db.models import Entry, EntryKind, Site, User
-from app.reports.prompts import format_entry, report_user_prompt
+from app.reports.prompts import format_entry, group_albums, report_user_prompt
 from app.reports.render import fmt_quantity, render_report, split_message
 from app.reports.schema import Severity, SiteDailyReport
 from app.services.llm import LLMError, extract_json
@@ -122,3 +122,17 @@ def test_report_user_prompt():
 )
 def test_parse_days_ago(args, expected):
     assert parse_days_ago(args) == expected
+
+
+def test_album_is_one_line_with_shared_caption():
+    first = _entry(id=1, kind=EntryKind.PHOTO, media_group_id="g", photo_description="Опалубка")
+    second = _entry(id=2, kind=EntryKind.PHOTO, media_group_id="g", text="Перекрытие 3 этажа")
+    third = _entry(id=3, text="Отдельное сообщение")
+    groups = group_albums([first, third, second])
+    assert [[e.id for e in g] for g in groups] == [[1, 2], [3]]
+
+    prompt = report_user_prompt(
+        Site(name="Склад"), date(2026, 9, 30), [first, third, second], "UTC"
+    )
+    assert "#1, #2 [06:15] Иван Петров, альбом (2 шт.): подпись: «Перекрытие 3 этажа»" in prompt
+    assert "на фото: #1 — Опалубка" in prompt
