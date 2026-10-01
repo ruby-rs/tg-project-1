@@ -217,7 +217,7 @@ async def test_full_flow(sessionmaker, settings, bot, tg, tmp_path):
     assert storage.path(voice_entry.file_path).read_bytes() == b"OggS-fake-voice"
     assert voice_entry.file_path.endswith(f"_{voice_entry.id}.ogg")
     assert len(photo_entry.file_sha256) == 64
-    assert f"🎙 <i>{transcriber.text}</i>" in tg.sent_texts()
+    assert any(t.startswith(f"🎙 <i>{transcriber.text}</i>") for t in tg.sent_texts())
 
     # 6. Отчёт
     await dp.feed_update(bot, make_update(text="/report"))
@@ -336,3 +336,68 @@ async def test_worker_retries_then_fails(sessionmaker, bot, tg, tmp_path):
         entry = await s.get(Entry, entry_id)
     assert entry.status == EntryStatus.FAILED
     assert "Не получилось расшифровать" in tg.sent_texts()[-1]
+
+
+def edited_update(message_id: int, **message_fields: Any) -> Update:
+    message = {
+        "message_id": message_id,
+        "date": int(datetime.now(UTC).timestamp()),
+        "edit_date": int(datetime.now(UTC).timestamp()),
+        "chat": {"id": TG_USER_ID, "type": "private"},
+        "from": {"id": TG_USER_ID, "is_bot": False, "first_name": "Иван"},
+        **message_fields,
+    }
+    return Update.model_validate({"update_id": next(_msg_ids), "edited_message": message})
+
+
+async def register_owner_with_site(dp, bot, site_name: str = "ЖК Северный") -> None:
+    await dp.feed_update(bot, make_update(text="/start"))
+    await dp.feed_update(bot, make_update(text="ООО Стройка"))
+    await dp.feed_update(bot, make_update(text="/new_object"))
+    await dp.feed_update(bot, make_update(text=site_name))
+
+
+async def test_transcript_fix_by_reply_and_edited_message(
+    sessionmaker, settings, bot, tg, tmp_path
+):
+    dp = build_dispatcher(settings, sessionmaker, ReportService(LLMClient(fake_openai([]), "m")))
+    await register_owner_with_site(dp, bot)
+
+    text_update = make_update(text="Залили 10 кубов")
+    await dp.feed_update(bot, text_update)
+    voice = {"file_id": "voice-file", "file_unique_id": "v1", "duration": 3}
+    await dp.feed_update(bot, make_update(voice=voice))
+
+    worker = Worker(
+        sessionmaker,
+        EntryProcessor(bot, LocalFileStorage(tmp_path), FakeTranscriber("Залили 12 кубов")),
+    )
+    for entry_id in await worker.claim(10):
+        await worker.handle(entry_id)
+
+    async with sessionmaker() as s:
+        voice_entry = await s.scalar(select(Entry).where(Entry.kind == EntryKind.VOICE))
+    assert voice_entry.transcript_message_id is not None
+    assert "ответьте на это сообщение" in tg.sent_texts()[-1]
+
+    # Прораб отвечает на расшифровку исправленным текстом
+    bot_message = {
+        "message_id": voice_entry.transcript_message_id,
+        "date": int(datetime.now(UTC).timestamp()),
+        "chat": {"id": TG_USER_ID, "type": "private"},
+        "from": {"id": 123456, "is_bot": True, "first_name": "Bot"},
+        "text": "🎙 Залили 12 кубов",
+    }
+    await dp.feed_update(bot, make_update(text="Залили 21 куб", reply_to_message=bot_message))
+    assert "Расшифровка исправлена" in tg.sent_texts()[-1]
+
+    # Прораб редактирует текстовое сообщение
+    await dp.feed_update(bot, edited_update(text_update.message.message_id, text="Залили 11 кубов"))
+
+    async with sessionmaker() as s:
+        entries = list(await s.scalars(select(Entry).order_by(Entry.id)))
+    assert len(entries) == 2  # ответ-исправление не создаёт новую запись
+    text_entry, voice_entry = entries
+    assert text_entry.text == "Залили 11 кубов" and text_entry.edited_at is not None
+    assert voice_entry.transcript == "Залили 21 куб"
+    assert voice_entry.transcript_original == "Залили 12 кубов"

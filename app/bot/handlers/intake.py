@@ -6,10 +6,11 @@
 
 import logging
 import time
+from datetime import UTC, datetime
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
-from aiogram.filters import StateFilter
+from aiogram.filters import Filter, StateFilter
 from aiogram.types import Message, ReactionTypeEmoji
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,6 +25,7 @@ log = logging.getLogger(__name__)
 
 router = Router(name="intake")
 router.message.filter(HasCompany(), StateFilter(None))
+router.edited_message.filter(HasCompany())
 
 # Лимит Bot API на скачивание файлов (без собственного Bot API сервера)
 MAX_DOWNLOAD_SIZE = 20 * 1024 * 1024
@@ -93,11 +95,49 @@ async def _save_and_ack(message: Message, entry: Entry, user: User, session: Asy
             )
         return
 
-    emoji = "👀" if entry.kind in AUDIO_KINDS else "👍"
+    await _react(message, "👀" if entry.kind in AUDIO_KINDS else "👍")
+
+
+async def _react(message: Message, emoji: str) -> None:
     try:
         await message.react([ReactionTypeEmoji(emoji=emoji)])
     except TelegramAPIError:
         log.debug("Реакции недоступны в чате %s", message.chat.id)
+
+
+class TranscriptReply(Filter):
+    """Ответ на сообщение бота с расшифровкой — это исправление расшифровки."""
+
+    async def __call__(self, message: Message, session: AsyncSession) -> bool | dict:
+        reply = message.reply_to_message
+        if reply is None or reply.from_user is None or not reply.from_user.is_bot:
+            return False
+        entry = await EntryRepo(session).get_by_transcript_message(
+            message.chat.id, reply.message_id
+        )
+        return {"entry": entry} if entry else False
+
+
+@router.message(F.text & ~F.text.startswith("/"), TranscriptReply())
+async def on_transcript_fix(message: Message, entry: Entry) -> None:
+    if entry.transcript_original is None:
+        entry.transcript_original = entry.transcript
+    entry.transcript = message.text.strip()
+    entry.edited_at = datetime.now(UTC)
+    await message.reply("✅ Расшифровка исправлена — в отчёт пойдёт ваш вариант.")
+
+
+@router.edited_message(F.text | F.caption)
+async def on_edited(message: Message, session: AsyncSession) -> None:
+    entry = await EntryRepo(session).get_by_message(message.chat.id, message.message_id)
+    if entry is None:
+        return
+    new_text = message.text if entry.kind == EntryKind.TEXT else message.caption
+    if new_text == entry.text:
+        return
+    entry.text = new_text
+    entry.edited_at = datetime.now(UTC)
+    await _react(message, "✍")
 
 
 @router.message(F.text & ~F.text.startswith("/"))

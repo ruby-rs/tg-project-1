@@ -126,6 +126,7 @@ class Entry(Base):
         UniqueConstraint("tg_chat_id", "tg_message_id", name="uq_entries_tg_message"),
         Index("ix_entries_site_date", "site_id", "work_date"),
         Index("ix_entries_queue", "status", "next_attempt_at"),
+        Index("ix_entries_transcript_message", "tg_chat_id", "transcript_message_id"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -155,7 +156,12 @@ class Entry(Base):
     file_sha256: Mapped[str | None] = mapped_column(String(64))
 
     text: Mapped[str | None] = mapped_column(Text)  # текст сообщения или подпись к медиа
+    edited_at: Mapped[datetime | None]  # прораб отредактировал текст или подпись
     transcript: Mapped[str | None] = mapped_column(Text)
+    # Исходная расшифровка Whisper, если прораб её исправил
+    transcript_original: Mapped[str | None] = mapped_column(Text)
+    # Сообщение бота с расшифровкой: ответ на него исправляет расшифровку
+    transcript_message_id: Mapped[int | None] = mapped_column(BigInteger)
     photo_description: Mapped[str | None] = mapped_column(Text)
 
     attempts: Mapped[int] = mapped_column(Integer, default=0)

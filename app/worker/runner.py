@@ -90,7 +90,10 @@ class Worker:
                 await self._mark_failed_attempt(session, entry_id, exc)
                 return
 
-        await self._processor.notify_done(entry)
+            message_id = await self._processor.notify_done(entry)
+            if message_id is not None:
+                entry.transcript_message_id = message_id
+                await session.commit()
 
     async def _load(self, session: AsyncSession, entry_id: int) -> Entry | None:
         return await session.get(

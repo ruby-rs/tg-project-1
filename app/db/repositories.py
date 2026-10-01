@@ -110,6 +110,31 @@ class EntryRepo:
         entry.id = entry_id
         return True
 
+    async def get_by_message(self, chat_id: int, message_id: int) -> Entry | None:
+        return await self.session.scalar(
+            select(Entry).where(Entry.tg_chat_id == chat_id, Entry.tg_message_id == message_id)
+        )
+
+    async def get_by_transcript_message(self, chat_id: int, message_id: int) -> Entry | None:
+        return await self.session.scalar(
+            select(Entry).where(
+                Entry.tg_chat_id == chat_id, Entry.transcript_message_id == message_id
+            )
+        )
+
+    async def album_caption(self, chat_id: int, media_group_id: str) -> str | None:
+        """Подпись альбома: Telegram кладёт её только в одно из сообщений группы."""
+        return await self.session.scalar(
+            select(Entry.text)
+            .where(
+                Entry.tg_chat_id == chat_id,
+                Entry.media_group_id == media_group_id,
+                Entry.text.is_not(None),
+            )
+            .order_by(Entry.tg_message_id)
+            .limit(1)
+        )
+
     async def assign_unsorted(self, user_id: int, site_id: int) -> int:
         """Привязывает к объекту сообщения, присланные до выбора объекта."""
         result = await self.session.execute(

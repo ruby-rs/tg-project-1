@@ -4,16 +4,19 @@ import mimetypes
 from html import escape
 
 from aiogram import Bot
-from aiogram.types import ReplyParameters
+from aiogram.types import Message, ReplyParameters
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import AUDIO_KINDS, Entry, EntryKind
+from app.db.repositories import EntryRepo
 from app.services.photos import PhotoDescriber, extract_taken_at
 from app.services.storage import LocalFileStorage
 from app.services.transcription import Transcriber
 from app.timeutils import to_local
 
 log = logging.getLogger(__name__)
+
+TRANSCRIPT_HINT = "Если есть ошибки — ответьте на это сообщение исправленным текстом."
 
 _DEFAULT_EXT = {
     EntryKind.VOICE: ".ogg",
@@ -84,21 +87,29 @@ class EntryProcessor:
         ):
             if data is None:
                 data = self.storage.path(entry.file_path).read_bytes()
+            hint = entry.text
+            if hint is None and entry.media_group_id:
+                hint = await EntryRepo(session).album_caption(
+                    entry.tg_chat_id, entry.media_group_id
+                )
             try:
-                entry.photo_description = await self.describer.describe(data, entry.text)
+                entry.photo_description = await self.describer.describe(data, hint)
             except Exception:
                 # Описание фото — не критично: в отчёт уйдёт хотя бы подпись
                 log.exception("Не удалось описать фото entry=%s", entry.id)
                 entry.photo_description = ""
 
-    async def notify_done(self, entry: Entry) -> None:
+    async def notify_done(self, entry: Entry) -> int | None:
+        """Присылает расшифровку. Возвращает id сообщения бота, чтобы ответом на него
+        прораб мог исправить расшифровку."""
         if entry.kind not in AUDIO_KINDS:
-            return
+            return None
         if entry.transcript:
-            text = f"🎙 <i>{escape(entry.transcript)}</i>"
+            text = f"🎙 <i>{escape(entry.transcript[:3900])}</i>\n\n{TRANSCRIPT_HINT}"
         else:
             text = "🎙 Не удалось разобрать речь — продублируйте текстом, пожалуйста."
-        await self._reply(entry, text[:4096])
+        sent = await self._reply(entry, text)
+        return sent.message_id if sent and entry.transcript else None
 
     async def notify_failed(self, entry: Entry) -> None:
         await self._reply(
@@ -110,9 +121,9 @@ class EntryProcessor:
             "но в отчёт текст не попадёт — продублируйте главное текстом.",
         )
 
-    async def _reply(self, entry: Entry, text: str) -> None:
+    async def _reply(self, entry: Entry, text: str) -> Message | None:
         try:
-            await self.bot.send_message(
+            return await self.bot.send_message(
                 entry.tg_chat_id,
                 text,
                 reply_parameters=ReplyParameters(
@@ -121,3 +132,4 @@ class EntryProcessor:
             )
         except Exception:
             log.exception("Не удалось отправить уведомление по entry=%s", entry.id)
+            return None
