@@ -47,6 +47,7 @@ class Settings(BaseSettings):
 
     # --- Воркер ---
     worker_concurrency: int = Field(default=4, ge=1)
+    report_concurrency: int = Field(default=1, ge=1)  # одновременных запросов к LLM
     worker_poll_interval: float = 2.0
     worker_max_attempts: int = 5
     worker_stale_after: int = 600  # сек: задача «зависла», можно брать повторно

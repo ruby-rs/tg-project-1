@@ -29,13 +29,23 @@ from aiogram.types import User as TgUser
 from sqlalchemy import select
 
 from app.bot.app import build_dispatcher
-from app.db.models import Company, DailyReport, Entry, EntryKind, EntryStatus, Site, User
+from app.db.models import (
+    Company,
+    DailyReport,
+    Entry,
+    EntryKind,
+    EntryStatus,
+    ReportJob,
+    Site,
+    User,
+)
 from app.db.repositories import EntryRepo
 from app.services.llm import LLMClient
 from app.services.reports import ReportService
 from app.services.storage import LocalFileStorage
 from app.worker.processor import EntryProcessor
-from app.worker.runner import Worker
+from app.worker.reports import ReportQueue
+from app.worker.runner import EntryQueue
 from tests.test_services import fake_openai
 
 TG_USER_ID = 555
@@ -158,7 +168,7 @@ def bot(tg: MockedSession) -> Bot:
 
 async def test_full_flow(sessionmaker, settings, bot, tg, tmp_path):
     llm_client = fake_openai([REPORT_JSON])
-    dp = build_dispatcher(settings, sessionmaker, ReportService(LLMClient(llm_client, "m")))
+    dp = build_dispatcher(settings, sessionmaker)
 
     # 1. Регистрация руководителя и компании
     await dp.feed_update(bot, make_update(text="/start"))
@@ -209,7 +219,7 @@ async def test_full_flow(sessionmaker, settings, bot, tg, tmp_path):
     # 5. Воркер: скачивает в архив и расшифровывает
     transcriber = FakeTranscriber()
     storage = LocalFileStorage(tmp_path / "media")
-    worker = Worker(sessionmaker, EntryProcessor(bot, storage, transcriber))
+    worker = EntryQueue(sessionmaker, EntryProcessor(bot, storage, transcriber))
     for entry_id in await worker.claim(10):
         await worker.handle(entry_id)
 
@@ -223,8 +233,16 @@ async def test_full_flow(sessionmaker, settings, bot, tg, tmp_path):
     assert len(photo_entry.file_sha256) == 64
     assert any(t.startswith(f"🎙 <i>{transcriber.text}</i>") for t in tg.sent_texts())
 
-    # 6. Отчёт
+    # 6. Отчёт: бот ставит задачу, воркер собирает и присылает
     await dp.feed_update(bot, make_update(text="/report"))
+    assert "⏳ Формирую отчёт по «ЖК Северный»" in tg.sent_texts()[-1]
+    await dp.feed_update(bot, make_update(text="/report"))
+    assert "уже формируется" in tg.sent_texts()[-1]
+
+    reports = ReportQueue(sessionmaker, bot, ReportService(LLMClient(llm_client, "m")))
+    job_ids = await reports.claim(10)
+    assert len(job_ids) == 1  # повторный /report не создал вторую задачу
+    await reports.handle(job_ids[0])
     report_text = tg.sent_texts()[-1]
     assert "ЖК Северный" in report_text
     assert "Бетонирование перекрытия — <b>12 м³</b>" in report_text
@@ -241,7 +259,7 @@ async def test_full_flow(sessionmaker, settings, bot, tg, tmp_path):
 
 
 async def test_duplicate_update_is_ignored(sessionmaker, settings, bot):
-    dp = build_dispatcher(settings, sessionmaker, ReportService(LLMClient(fake_openai([]), "m")))
+    dp = build_dispatcher(settings, sessionmaker)
     await dp.feed_update(bot, make_update(text="/start"))
     await dp.feed_update(bot, make_update(text="ООО Стройка"))
     update = make_update(text="Сообщение")
@@ -264,7 +282,7 @@ async def test_foreman_sees_only_own_sites(sessionmaker, settings, bot, tg):
         )
         await s.commit()
 
-    dp = build_dispatcher(settings, sessionmaker, ReportService(LLMClient(fake_openai([]), "m")))
+    dp = build_dispatcher(settings, sessionmaker)
 
     # Приглашение в компанию без объекта: объектов прораб пока не видит
     await dp.feed_update(bot, make_update(text="/start inv_CODE123"))
@@ -292,7 +310,7 @@ async def test_foreman_sees_only_own_sites(sessionmaker, settings, bot, tg):
 
 
 async def test_manager_creates_site_invite(sessionmaker, settings, bot, tg):
-    dp = build_dispatcher(settings, sessionmaker, ReportService(LLMClient(fake_openai([]), "m")))
+    dp = build_dispatcher(settings, sessionmaker)
     await register_owner_with_site(dp, bot, "Склад")
     async with sessionmaker() as s:
         site = await s.scalar(select(Site))
@@ -348,7 +366,7 @@ async def test_claim_skips_locked_and_respects_backoff(sessionmaker):
 async def test_worker_retries_then_fails(sessionmaker, bot, tg, tmp_path):
     entry_id = await _seed_entry(sessionmaker)
     processor = EntryProcessor(bot, LocalFileStorage(tmp_path), FailingTranscriber())
-    worker = Worker(sessionmaker, processor, max_attempts=2)
+    worker = EntryQueue(sessionmaker, processor, max_attempts=2)
 
     assert await worker.claim(10) == [entry_id]
     await worker.handle(entry_id)
@@ -393,7 +411,7 @@ async def register_owner_with_site(dp, bot, site_name: str = "ЖК Северн�
 async def test_transcript_fix_by_reply_and_edited_message(
     sessionmaker, settings, bot, tg, tmp_path
 ):
-    dp = build_dispatcher(settings, sessionmaker, ReportService(LLMClient(fake_openai([]), "m")))
+    dp = build_dispatcher(settings, sessionmaker)
     await register_owner_with_site(dp, bot)
 
     text_update = make_update(text="Залили 10 кубов")
@@ -401,7 +419,7 @@ async def test_transcript_fix_by_reply_and_edited_message(
     voice = {"file_id": "voice-file", "file_unique_id": "v1", "duration": 3}
     await dp.feed_update(bot, make_update(voice=voice))
 
-    worker = Worker(
+    worker = EntryQueue(
         sessionmaker,
         EntryProcessor(bot, LocalFileStorage(tmp_path), FakeTranscriber("Залили 12 кубов")),
     )
@@ -434,3 +452,43 @@ async def test_transcript_fix_by_reply_and_edited_message(
     assert text_entry.text == "Залили 11 кубов" and text_entry.edited_at is not None
     assert voice_entry.transcript == "Залили 21 куб"
     assert voice_entry.transcript_original == "Залили 12 кубов"
+
+
+async def test_report_waits_for_unprocessed_entries(sessionmaker, settings, bot, tg):
+    dp = build_dispatcher(settings, sessionmaker)
+    await register_owner_with_site(dp, bot)
+    voice = {"file_id": "voice-file", "file_unique_id": "v1", "duration": 3}
+    await dp.feed_update(bot, make_update(voice=voice))  # ещё не расшифровано
+    await dp.feed_update(bot, make_update(text="/report"))
+
+    llm_client = fake_openai([REPORT_JSON])
+    reports = ReportQueue(sessionmaker, bot, ReportService(LLMClient(llm_client, "m")))
+    [job_id] = await reports.claim(10)
+    await reports.handle(job_id)
+
+    async with sessionmaker() as s:
+        job = await s.get(ReportJob, job_id)
+    assert job.status == EntryStatus.PENDING and job.attempts == 0
+    assert job.next_attempt_at is not None
+    assert llm_client.chat.completions.calls == []  # LLM не вызывали
+
+
+async def test_report_failure_is_reported_after_attempts(sessionmaker, settings, bot, tg):
+    dp = build_dispatcher(settings, sessionmaker)
+    await register_owner_with_site(dp, bot)
+    await dp.feed_update(bot, make_update(text="Залили 10 кубов"))
+    await dp.feed_update(bot, make_update(text="/report"))
+
+    reports = ReportQueue(
+        sessionmaker,
+        bot,
+        ReportService(LLMClient(fake_openai(["мусор"] * 4), "m")),
+        max_attempts=1,
+    )
+    [job_id] = await reports.claim(10)
+    await reports.handle(job_id)
+
+    async with sessionmaker() as s:
+        job = await s.get(ReportJob, job_id)
+    assert job.status == EntryStatus.FAILED
+    assert "Не удалось сформировать отчёт" in tg.sent_texts()[-1]

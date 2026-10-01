@@ -48,7 +48,8 @@ class LLMClient:
             base_url=settings.llm_base_url,
             project=settings.llm_project,
             timeout=settings.llm_timeout,
-            max_retries=2,
+            # Повторы делает очередь отчётов; здесь — только от сетевых сбоев
+            max_retries=1,
         )
         return cls(
             client,

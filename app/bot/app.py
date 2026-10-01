@@ -11,8 +11,6 @@ from app.bot.handlers import get_routers
 from app.bot.middlewares import DbSessionMiddleware, UserMiddleware
 from app.config import Settings
 from app.db.session import create_engine, create_sessionmaker
-from app.services.llm import LLMClient
-from app.services.reports import ReportService
 
 log = logging.getLogger(__name__)
 
@@ -26,12 +24,10 @@ COMMANDS = [
 
 
 def build_dispatcher(
-    settings: Settings,
-    sessionmaker: async_sessionmaker[AsyncSession],
-    report_service: ReportService,
+    settings: Settings, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> Dispatcher:
     # FSM в памяти: для MVP достаточно, при масштабировании — RedisStorage
-    dp = Dispatcher(storage=MemoryStorage(), settings=settings, report_service=report_service)
+    dp = Dispatcher(storage=MemoryStorage(), settings=settings)
     dp.update.outer_middleware(DbSessionMiddleware(sessionmaker))
     dp.update.outer_middleware(UserMiddleware())
     dp.include_routers(*get_routers())
@@ -45,8 +41,7 @@ async def run_bot(settings: Settings) -> None:
         settings.bot_token.get_secret_value(),
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
-    report_service = ReportService(LLMClient.from_settings(settings))
-    dp = build_dispatcher(settings, sessionmaker, report_service)
+    dp = build_dispatcher(settings, sessionmaker)
 
     try:
         await bot.set_my_commands(COMMANDS)

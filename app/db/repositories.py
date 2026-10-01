@@ -10,6 +10,7 @@ from app.db.models import (
     DailyReport,
     Entry,
     EntryStatus,
+    ReportJob,
     Site,
     SiteMember,
     User,
@@ -188,35 +189,69 @@ class EntryRepo:
         )
 
     async def claim_batch(self, limit: int, stale_after: int) -> list[int]:
-        """Забирает задачи в работу. SKIP LOCKED позволяет запускать несколько воркеров."""
-        ready = and_(
-            Entry.status == EntryStatus.PENDING,
-            or_(Entry.next_attempt_at.is_(None), Entry.next_attempt_at <= func.now()),
-        )
-        stale = and_(
-            Entry.status == EntryStatus.PROCESSING,
-            Entry.locked_at < func.now() - timedelta(seconds=stale_after),
-        )
-        candidates = (
-            select(Entry.id)
-            .where(or_(ready, stale))
-            .order_by(Entry.id)
-            .limit(limit)
-            .with_for_update(skip_locked=True)
-            .scalar_subquery()
-        )
-        result = await self.session.scalars(
-            update(Entry)
-            .where(Entry.id.in_(candidates))
+        return await claim_jobs(self.session, Entry, limit, stale_after)
+
+
+async def claim_jobs(
+    session: AsyncSession, model: type[Entry] | type[ReportJob], limit: int, stale_after: int
+) -> list[int]:
+    """Забирает задачи очереди в работу. SKIP LOCKED позволяет запускать несколько воркеров.
+
+    Подходят готовые задачи (pending, срок повтора наступил) и «зависшие» (processing
+    дольше stale_after секунд — например, воркер упал посреди обработки).
+    """
+    ready = and_(
+        model.status == EntryStatus.PENDING,
+        or_(model.next_attempt_at.is_(None), model.next_attempt_at <= func.now()),
+    )
+    stale = and_(
+        model.status == EntryStatus.PROCESSING,
+        model.locked_at < func.now() - timedelta(seconds=stale_after),
+    )
+    candidates = (
+        select(model.id)
+        .where(or_(ready, stale))
+        .order_by(model.id)
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+        .scalar_subquery()
+    )
+    result = await session.scalars(
+        update(model)
+        .where(model.id.in_(candidates))
+        .values(status=EntryStatus.PROCESSING, locked_at=func.now(), attempts=model.attempts + 1)
+        .returning(model.id)
+        .execution_options(synchronize_session=False)
+    )
+    return list(result)
+
+
+class ReportJobRepo:
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def enqueue(self, site_id: int, work_date: date, chat_id: int, user_id: int) -> bool:
+        """Ставит отчёт в очередь. False — такой отчёт уже формируется для этого чата."""
+        stmt = (
+            pg_insert(ReportJob)
             .values(
-                status=EntryStatus.PROCESSING,
-                locked_at=func.now(),
-                attempts=Entry.attempts + 1,
+                site_id=site_id,
+                work_date=work_date,
+                chat_id=chat_id,
+                user_id=user_id,
+                status=EntryStatus.PENDING,
+                attempts=0,
             )
-            .returning(Entry.id)
-            .execution_options(synchronize_session=False)
+            .on_conflict_do_nothing(
+                index_elements=["site_id", "work_date", "chat_id"],
+                index_where=ReportJob.status.in_([EntryStatus.PENDING, EntryStatus.PROCESSING]),
+            )
+            .returning(ReportJob.id)
         )
-        return list(result)
+        return await self.session.scalar(stmt) is not None
+
+    async def claim_batch(self, limit: int, stale_after: int) -> list[int]:
+        return await claim_jobs(self.session, ReportJob, limit, stale_after)
 
 
 class ReportRepo:

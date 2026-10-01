@@ -16,6 +16,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -194,6 +195,39 @@ class Entry(Base):
     company: Mapped[Company] = relationship()
     site: Mapped[Site | None] = relationship()
     user: Mapped[User] = relationship()
+
+
+class ReportJob(Base):
+    """Запрос отчёта: бот ставит задачу, воркер собирает отчёт и присылает его в чат."""
+
+    __tablename__ = "report_jobs"
+    __table_args__ = (
+        Index("ix_report_jobs_queue", "status", "next_attempt_at"),
+        # Повторный /report, пока прошлый не готов, не создаёт дубль
+        Index(
+            "ux_report_jobs_active",
+            "site_id",
+            "work_date",
+            "chat_id",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'processing')"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    site_id: Mapped[int] = mapped_column(ForeignKey("sites.id", ondelete="CASCADE"))
+    work_date: Mapped[date]
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    status: Mapped[str] = mapped_column(String(16), default=EntryStatus.PENDING)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime | None]
+    locked_at: Mapped[datetime | None]
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    finished_at: Mapped[datetime | None]
+
+    site: Mapped[Site] = relationship()
 
 
 class DailyReport(Base):
