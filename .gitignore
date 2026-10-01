@@ -8,3 +8,5 @@ venv/
 .ruff_cache/
 /data/
 media/
+# Локальные настройки сервера (например, Ollama)
+docker-compose.override.yml
