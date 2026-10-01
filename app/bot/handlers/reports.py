@@ -85,11 +85,13 @@ async def cmd_report(
     report_service: ReportService,
 ) -> None:
     days_ago = parse_days_ago(command.args)
-    if user.current_site is not None and not user.is_manager:
+    repo = SiteRepo(session)
+    current = await repo.get_for_user(user, user.current_site_id) if user.current_site_id else None
+    if current is not None and not user.is_manager:
         await _send_report(
             bot,
             message.chat.id,
-            user.current_site,
+            current,
             days_ago,
             user,
             session,
@@ -98,7 +100,7 @@ async def cmd_report(
         )
         return
 
-    sites = await SiteRepo(session).list_active(user.company_id)
+    sites = await repo.list_for_user(user)
     if not sites:
         await message.answer("Объектов пока нет. Добавьте первый: /new_object")
     elif len(sites) == 1:
@@ -121,7 +123,7 @@ async def on_report_site(
     settings: Settings,
     report_service: ReportService,
 ) -> None:
-    site = await SiteRepo(session).get(user.company_id, callback_data.site_id)
+    site = await SiteRepo(session).get_for_user(user, callback_data.site_id)
     if site is None:
         await call.answer("Объект не найден", show_alert=True)
         return

@@ -1,7 +1,6 @@
-import secrets
 from datetime import date, timedelta
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import Select, and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
@@ -12,8 +11,10 @@ from app.db.models import (
     Entry,
     EntryStatus,
     Site,
+    SiteMember,
     User,
     UserRole,
+    new_invite_code,
 )
 
 
@@ -47,7 +48,7 @@ class CompanyRepo:
         self.session = session
 
     async def create(self, name: str, timezone: str, owner: User) -> Company:
-        company = Company(name=name, timezone=timezone, invite_code=secrets.token_urlsafe(9))
+        company = Company(name=name, timezone=timezone, invite_code=new_invite_code())
         self.session.add(company)
         await self.session.flush()
         owner.company = company
@@ -62,29 +63,44 @@ class SiteRepo:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def create(self, company_id: int, name: str) -> Site:
+    async def create(self, company_id: int, name: str, creator: User) -> Site:
         site = Site(company_id=company_id, name=name)
         self.session.add(site)
         await self.session.flush()
+        await self.add_member(site.id, creator.id)
         return site
 
-    async def get(self, company_id: int, site_id: int) -> Site | None:
-        return await self.session.scalar(
-            select(Site).where(Site.id == site_id, Site.company_id == company_id)
+    async def add_member(self, site_id: int, user_id: int) -> None:
+        await self.session.execute(
+            pg_insert(SiteMember).values(site_id=site_id, user_id=user_id).on_conflict_do_nothing()
         )
+
+    async def get_by_invite(self, code: str) -> Site | None:
+        return await self.session.scalar(
+            select(Site)
+            .options(joinedload(Site.company))
+            .where(Site.invite_code == code, Site.is_active.is_(True))
+        )
+
+    def _visible_to(self, user: User) -> Select[tuple[Site]]:
+        """Руководитель видит все объекты компании, прораб — только свои."""
+        stmt = select(Site).where(Site.company_id == user.company_id, Site.is_active.is_(True))
+        if not user.is_manager:
+            stmt = stmt.join(
+                SiteMember, and_(SiteMember.site_id == Site.id, SiteMember.user_id == user.id)
+            )
+        return stmt
+
+    async def get_for_user(self, user: User, site_id: int) -> Site | None:
+        return await self.session.scalar(self._visible_to(user).where(Site.id == site_id))
+
+    async def list_for_user(self, user: User) -> list[Site]:
+        return list(await self.session.scalars(self._visible_to(user).order_by(Site.name)))
 
     async def get_by_name(self, company_id: int, name: str) -> Site | None:
         return await self.session.scalar(
             select(Site).where(Site.company_id == company_id, func.lower(Site.name) == name.lower())
         )
-
-    async def list_active(self, company_id: int) -> list[Site]:
-        result = await self.session.scalars(
-            select(Site)
-            .where(Site.company_id == company_id, Site.is_active.is_(True))
-            .order_by(Site.name)
-        )
-        return list(result)
 
 
 class EntryRepo:

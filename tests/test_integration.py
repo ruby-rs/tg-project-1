@@ -18,12 +18,14 @@ from aiogram.methods import (
     AnswerCallbackQuery,
     EditMessageText,
     GetFile,
+    GetMe,
     SendChatAction,
     SendMessage,
     SetMessageReaction,
     TelegramMethod,
 )
 from aiogram.types import Chat, File, Message, Update
+from aiogram.types import User as TgUser
 from sqlalchemy import select
 
 from app.bot.app import build_dispatcher
@@ -47,6 +49,8 @@ class MockedSession(BaseSession):
 
     async def make_request(self, bot: Bot, method: TelegramMethod[Any], timeout: int | None = None):
         self.requests.append(method)
+        if isinstance(method, GetMe):
+            return TgUser(id=123456, is_bot=True, first_name="Bot", username="prorab_test_bot")
         if isinstance(method, GetFile):
             return File(file_id=method.file_id, file_unique_id="u", file_path=method.file_id)
         if isinstance(method, SendMessage):
@@ -247,26 +251,55 @@ async def test_duplicate_update_is_ignored(sessionmaker, settings, bot):
         assert len(list(await s.scalars(select(Entry)))) == 1
 
 
-async def test_foreman_joins_by_invite_and_selects_site(sessionmaker, settings, bot, tg):
+async def test_foreman_sees_only_own_sites(sessionmaker, settings, bot, tg):
     async with sessionmaker() as s:
         company = Company(name="ООО Стройка", invite_code="CODE123")
         s.add(company)
         await s.flush()
-        s.add(Site(company_id=company.id, name="Склад"))
+        s.add_all(
+            [
+                Site(company_id=company.id, name="Склад", invite_code="SKLAD"),
+                Site(company_id=company.id, name="Офис", invite_code="OFIS"),
+            ]
+        )
         await s.commit()
 
     dp = build_dispatcher(settings, sessionmaker, ReportService(LLMClient(fake_openai([]), "m")))
+
+    # Приглашение в компанию без объекта: объектов прораб пока не видит
     await dp.feed_update(bot, make_update(text="/start inv_CODE123"))
     assert "Вы подключены к компании «ООО Стройка»" in tg.sent_texts()[-1]
+    assert "Вас пока не добавили ни на один объект" in tg.sent_texts()[-1]
 
-    async with sessionmaker() as s:
-        site = await s.scalar(select(Site))
-    await dp.feed_update(bot, callback_update(f"site:{site.id}"))
+    # Приглашение на объект: доступ и текущий объект
+    await dp.feed_update(bot, make_update(text="/start site_SKLAD"))
     assert "Текущий объект: <b>Склад</b>" in tg.sent_texts()[-1]
 
+    tg.requests.clear()
+    await dp.feed_update(bot, make_update(text="/object"))
+    keyboard = tg.requests[-1].reply_markup.inline_keyboard
+    assert [row[0].text for row in keyboard] == ["✅ Склад", "➕ Новый объект"]
+
+    # Чужой объект нельзя выбрать, даже подделав callback
     async with sessionmaker() as s:
+        office = await s.scalar(select(Site).where(Site.name == "Офис"))
         user = await s.scalar(select(User))
-    assert user.role == "foreman" and user.current_site_id == site.id
+    await dp.feed_update(bot, callback_update(f"site:{office.id}"))
+    assert any(
+        isinstance(r, AnswerCallbackQuery) and r.text == "Объект не найден" for r in tg.requests
+    )
+    assert user.role == "foreman"
+
+
+async def test_manager_creates_site_invite(sessionmaker, settings, bot, tg):
+    dp = build_dispatcher(settings, sessionmaker, ReportService(LLMClient(fake_openai([]), "m")))
+    await register_owner_with_site(dp, bot, "Склад")
+    async with sessionmaker() as s:
+        site = await s.scalar(select(Site))
+
+    await dp.feed_update(bot, make_update(text="/invite"))
+    await dp.feed_update(bot, callback_update(f"invite:{site.id}"))
+    assert f"start=site_{site.invite_code}" in tg.sent_texts()[-1]
 
 
 async def _seed_entry(sessionmaker, **kw) -> int:

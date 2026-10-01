@@ -1,3 +1,4 @@
+import secrets
 from datetime import date, datetime
 from enum import StrEnum
 from typing import Any
@@ -26,6 +27,10 @@ NAMING_CONVENTION = {
     "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
     "pk": "pk_%(table_name)s",
 }
+
+
+def new_invite_code() -> str:
+    return secrets.token_urlsafe(9)
 
 
 class Base(DeclarativeBase):
@@ -109,9 +114,25 @@ class Site(Base):
     name: Mapped[str] = mapped_column(String(255))
     address: Mapped[str | None] = mapped_column(String(500))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Ссылка-приглашение сразу на объект: прораб попадает и в компанию, и на объект
+    invite_code: Mapped[str] = mapped_column(String(32), unique=True, default=new_invite_code)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
     company: Mapped[Company] = relationship(back_populates="sites")
+
+
+class SiteMember(Base):
+    """Прораб допущен к объекту. Руководители видят все объекты без записей здесь."""
+
+    __tablename__ = "site_members"
+
+    site_id: Mapped[int] = mapped_column(
+        ForeignKey("sites.id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
 class Entry(Base):

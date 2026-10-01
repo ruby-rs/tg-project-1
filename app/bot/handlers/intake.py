@@ -83,7 +83,7 @@ async def _save_and_ack(message: Message, entry: Entry, user: User, session: Asy
     if entry.site_id is None:
         if not _first_in_album(entry.media_group_id):
             return
-        sites = await SiteRepo(session).list_active(user.company_id)
+        sites = await SiteRepo(session).list_for_user(user)
         if sites:
             await message.reply(
                 "Сохранил. К какому объекту это относится?",

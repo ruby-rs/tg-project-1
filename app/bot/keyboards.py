@@ -20,6 +20,19 @@ class ReportSite(CallbackData, prefix="rep"):
     days_ago: int = 0
 
 
+class InviteLink(CallbackData, prefix="invite"):
+    site_id: int  # 0 — приглашение в компанию без объекта
+
+
+def invite_keyboard(sites: Sequence[Site]) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for site in sites:
+        kb.button(text=f"🏗 {site.name}", callback_data=InviteLink(site_id=site.id))
+    kb.button(text="🏢 В компанию, без объекта", callback_data=InviteLink(site_id=0))
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 def sites_keyboard(sites: Sequence[Site], current_id: int | None) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for site in sites:

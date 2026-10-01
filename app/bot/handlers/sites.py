@@ -17,7 +17,7 @@ router.message.filter(HasCompany())
 router.callback_query.filter(HasCompany())
 
 
-async def _set_current_site(session: AsyncSession, user: User, site: Site) -> str:
+async def set_current_site(session: AsyncSession, user: User, site: Site) -> str:
     user.current_site = site
     moved = await EntryRepo(session).assign_unsorted(user.id, site.id)
     text = f"📍 Текущий объект: <b>{escape(site.name)}</b>\nВсе новые сообщения — сюда."
@@ -28,9 +28,12 @@ async def _set_current_site(session: AsyncSession, user: User, site: Site) -> st
 
 @router.message(Command("object", "objects"))
 async def cmd_object(message: Message, user: User, session: AsyncSession) -> None:
-    sites = await SiteRepo(session).list_active(user.company_id)
+    sites = await SiteRepo(session).list_for_user(user)
     if not sites:
-        await message.answer("Объектов пока нет. Добавьте первый: /new_object")
+        await message.answer(
+            "Объектов пока нет. Добавьте свой (/new_object) или попросите у руководителя "
+            "ссылку на объект."
+        )
         return
     await message.answer(
         "Выберите объект:", reply_markup=sites_keyboard(sites, user.current_site_id)
@@ -41,11 +44,11 @@ async def cmd_object(message: Message, user: User, session: AsyncSession) -> Non
 async def on_site_selected(
     call: CallbackQuery, callback_data: SiteSelect, user: User, session: AsyncSession
 ) -> None:
-    site = await SiteRepo(session).get(user.company_id, callback_data.site_id)
+    site = await SiteRepo(session).get_for_user(user, callback_data.site_id)
     if site is None:
         await call.answer("Объект не найден", show_alert=True)
         return
-    text = await _set_current_site(session, user, site)
+    text = await set_current_site(session, user, site)
     await call.answer()
     if call.message:
         await call.message.edit_text(text)
@@ -76,9 +79,10 @@ async def on_site_name(
     repo = SiteRepo(session)
     if await repo.get_by_name(user.company_id, name):
         await message.answer(
-            "Такой объект уже есть. Выберите его через /object или введите другое имя."
+            "Такой объект уже есть в компании. Выберите его через /object, "
+            "попросите у руководителя ссылку на него или введите другое имя."
         )
         return
-    site = await repo.create(user.company_id, name)
+    site = await repo.create(user.company_id, name, creator=user)
     await state.clear()
-    await message.answer("🏗 Объект добавлен.\n" + await _set_current_site(session, user, site))
+    await message.answer("🏗 Объект добавлен.\n" + await set_current_site(session, user, site))
