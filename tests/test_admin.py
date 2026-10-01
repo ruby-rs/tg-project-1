@@ -103,6 +103,10 @@ async def test_foreman_has_no_admin_commands(sessionmaker, settings, bot, tg):
     await register_owner_with_site(dp, bot)
     await join_foreman_to_site(dp, bot, sessionmaker)
     await dp.feed_update(bot, make_update(user_id=FOREMAN_ID, text="/team"))
+    assert "/team доступна только руководителю" in tg.sent_texts()[-1]
+    await dp.feed_update(bot, make_update(user_id=FOREMAN_ID, text="/stats@prorab_bot"))
+    assert "/stats доступна только руководителю" in tg.sent_texts()[-1]
+    await dp.feed_update(bot, make_update(user_id=FOREMAN_ID, text="/nonsense"))
     assert "Не знаю такой команды" in tg.sent_texts()[-1]
 
 
