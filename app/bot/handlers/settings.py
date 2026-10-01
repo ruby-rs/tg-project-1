@@ -160,8 +160,8 @@ async def on_settings_action(
     await call.message.edit_text(settings_text(company), reply_markup=settings_keyboard())
 
 
-@router.message(CompanySettings.digest_time, F.text)
-@router.message(CompanySettings.reminder_time, F.text)
+@router.message(CompanySettings.digest_time, F.text & ~F.text.startswith("/"))
+@router.message(CompanySettings.reminder_time, F.text & ~F.text.startswith("/"))
 async def on_time_input(message: Message, user: User, state: FSMContext) -> None:
     try:
         value = parse_time(message.text)
