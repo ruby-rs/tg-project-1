@@ -1,6 +1,6 @@
 from datetime import date, timedelta
 
-from sqlalchemy import Select, and_, func, or_, select, update
+from sqlalchemy import Select, and_, case, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
@@ -42,6 +42,27 @@ class UserRepo:
             )
         )
         return list(result)
+
+    async def list_company(self, company_id: int) -> list[User]:
+        role_order = case(
+            (User.role == UserRole.OWNER, 0), (User.role == UserRole.MANAGER, 1), else_=2
+        )
+        result = await self.session.scalars(
+            select(User).where(User.company_id == company_id).order_by(role_order, User.full_name)
+        )
+        return list(result)
+
+    async def get_in_company(self, company_id: int, user_id: int) -> User | None:
+        return await self.session.scalar(
+            select(User).where(User.company_id == company_id, User.id == user_id)
+        )
+
+    async def remove_from_company(self, user: User) -> None:
+        """Сообщения уходят в архив компании и остаются в отчётах; доступ закрывается."""
+        await self.session.execute(delete(SiteMember).where(SiteMember.user_id == user.id))
+        user.company = None
+        user.current_site = None
+        user.role = UserRole.FOREMAN
 
 
 class CompanyRepo:
@@ -102,6 +123,44 @@ class SiteRepo:
         return await self.session.scalar(
             select(Site).where(Site.company_id == company_id, func.lower(Site.name) == name.lower())
         )
+
+    async def get_in_company(self, company_id: int, site_id: int) -> Site | None:
+        """Любой объект компании, включая закрытые, — для управления руководителем."""
+        return await self.session.scalar(
+            select(Site).where(Site.company_id == company_id, Site.id == site_id)
+        )
+
+    async def list_all(self, company_id: int) -> list[Site]:
+        result = await self.session.scalars(
+            select(Site)
+            .where(Site.company_id == company_id)
+            .order_by(Site.is_active.desc(), Site.name)
+        )
+        return list(result)
+
+    async def members(self, site_id: int) -> list[User]:
+        result = await self.session.scalars(
+            select(User)
+            .join(SiteMember, SiteMember.user_id == User.id)
+            .where(SiteMember.site_id == site_id)
+            .order_by(User.full_name)
+        )
+        return list(result)
+
+    async def remove_member(self, site_id: int, user: User) -> None:
+        await self.session.execute(
+            delete(SiteMember).where(SiteMember.site_id == site_id, SiteMember.user_id == user.id)
+        )
+        if user.current_site_id == site_id:
+            user.current_site = None
+
+    async def set_active(self, site: Site, active: bool) -> None:
+        site.is_active = active
+        if not active:
+            # Сообщения на закрытый объект больше не привязываются
+            await self.session.execute(
+                update(User).where(User.current_site_id == site.id).values(current_site_id=None)
+            )
 
 
 class EntryRepo:

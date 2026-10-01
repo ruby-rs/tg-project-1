@@ -20,6 +20,8 @@ COMMANDS = [
     BotCommand(command="report", description="Отчёт за день"),
     BotCommand(command="new_object", description="Добавить объект"),
     BotCommand(command="invite", description="Пригласить прораба"),
+    BotCommand(command="sites", description="Управление объектами"),
+    BotCommand(command="team", description="Команда"),
     BotCommand(command="help", description="Как пользоваться"),
     BotCommand(command="privacy", description="Персональные данные"),
 ]

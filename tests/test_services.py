@@ -1,6 +1,5 @@
 import io
 from datetime import UTC, date, datetime
-from types import SimpleNamespace
 
 import pytest
 from PIL import Image
@@ -13,6 +12,7 @@ from app.services.storage import LocalFileStorage
 from app.timeutils import work_date_for
 from app.worker.processor import file_extension
 from app.worker.runner import retry_delay
+from tests.helpers import fake_openai
 
 
 def test_work_date_uses_company_timezone():
@@ -87,21 +87,6 @@ def test_retry_delay_grows_and_is_capped():
     assert retry_delay(1).total_seconds() == 30
     assert retry_delay(2).total_seconds() == 60
     assert retry_delay(10).total_seconds() == 900
-
-
-class FakeCompletions:
-    def __init__(self, answers: list[str]) -> None:
-        self.answers = answers
-        self.calls: list[dict] = []
-
-    async def create(self, **kwargs):
-        self.calls.append(kwargs)
-        content = self.answers.pop(0)
-        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
-
-
-def fake_openai(answers: list[str]) -> SimpleNamespace:
-    return SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions(answers)))
 
 
 async def test_llm_repairs_invalid_json():

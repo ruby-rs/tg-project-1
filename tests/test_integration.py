@@ -4,29 +4,9 @@ Telegram API подменён MockedSession, LLM и Whisper — фейками.
 """
 
 import asyncio
-import json
-from collections.abc import AsyncGenerator
 from datetime import UTC, date, datetime, timedelta
-from itertools import count
-from pathlib import Path
-from typing import Any
 
-import pytest
-from aiogram import Bot
-from aiogram.client.session.base import BaseSession
-from aiogram.methods import (
-    AnswerCallbackQuery,
-    EditMessageReplyMarkup,
-    EditMessageText,
-    GetFile,
-    GetMe,
-    SendChatAction,
-    SendMessage,
-    SetMessageReaction,
-    TelegramMethod,
-)
-from aiogram.types import Chat, File, Message, Update
-from aiogram.types import User as TgUser
+from aiogram.methods import AnswerCallbackQuery, SetMessageReaction
 from sqlalchemy import select
 
 from app.bot.app import build_dispatcher
@@ -47,124 +27,18 @@ from app.services.storage import LocalFileStorage
 from app.worker.processor import EntryProcessor
 from app.worker.reports import ReportQueue
 from app.worker.runner import EntryQueue
-from tests.test_services import fake_openai
-
-TG_USER_ID = 555
-
-
-class MockedSession(BaseSession):
-    def __init__(self, files: dict[str, bytes] | None = None) -> None:
-        super().__init__()
-        self.requests: list[TelegramMethod[Any]] = []
-        self.files = files or {}
-
-    async def make_request(self, bot: Bot, method: TelegramMethod[Any], timeout: int | None = None):
-        self.requests.append(method)
-        if isinstance(method, GetMe):
-            return TgUser(id=123456, is_bot=True, first_name="Bot", username="prorab_test_bot")
-        if isinstance(method, GetFile):
-            return File(file_id=method.file_id, file_unique_id="u", file_path=method.file_id)
-        if isinstance(method, SendMessage):
-            return Message(
-                message_id=10_000 + len(self.requests),
-                date=datetime.now(UTC),
-                chat=Chat(id=method.chat_id, type="private"),
-                text=method.text,
-            )
-        if isinstance(method, SetMessageReaction | SendChatAction | AnswerCallbackQuery):
-            return True
-        if isinstance(method, EditMessageText | EditMessageReplyMarkup):
-            return True
-        raise NotImplementedError(type(method).__name__)
-
-    async def stream_content(self, url: str, *args: Any, **kwargs: Any) -> AsyncGenerator[bytes]:
-        yield self.files[url.rsplit("/", 1)[-1]]
-
-    async def close(self) -> None:
-        pass
-
-    def sent_texts(self) -> list[str]:
-        return [r.text for r in self.requests if isinstance(r, SendMessage | EditMessageText)]
-
-
-class FakeTranscriber:
-    def __init__(self, text: str = "Залили 12 кубов бетона в перекрытие") -> None:
-        self.text = text
-        self.calls: list[Path] = []
-
-    async def transcribe(self, path: Path) -> str:
-        self.calls.append(path)
-        return self.text
-
-
-class FailingTranscriber:
-    async def transcribe(self, path: Path) -> str:
-        raise ConnectionError("whisper недоступен")
-
-
-_msg_ids = count(1)
-
-
-def make_update(**message_fields: Any) -> Update:
-    message_id = next(_msg_ids)
-    message = {
-        "message_id": message_id,
-        "date": int(datetime.now(UTC).timestamp()),
-        "chat": {"id": TG_USER_ID, "type": "private"},
-        "from": {"id": TG_USER_ID, "is_bot": False, "first_name": "Иван", "last_name": "Петров"},
-        **message_fields,
-    }
-    return Update.model_validate({"update_id": message_id, "message": message})
-
-
-def callback_update(data: str) -> Update:
-    update_id = next(_msg_ids)
-    return Update.model_validate(
-        {
-            "update_id": update_id,
-            "callback_query": {
-                "id": str(update_id),
-                "chat_instance": "ci",
-                "data": data,
-                "from": {"id": TG_USER_ID, "is_bot": False, "first_name": "Иван"},
-                "message": {
-                    "message_id": 1,
-                    "date": int(datetime.now(UTC).timestamp()),
-                    "chat": {"id": TG_USER_ID, "type": "private"},
-                    "text": "Выберите объект:",
-                },
-            },
-        }
-    )
-
-
-REPORT_JSON = json.dumps(
-    {
-        "summary": "Забетонировано перекрытие 3 этажа.",
-        "work_done": [
-            {
-                "description": "Бетонирование перекрытия",
-                "quantity": 12,
-                "unit": "м³",
-                "entry_ids": [1, 2, 424242],
-            }
-        ],
-        "issues": [],
-        "materials_needed": [{"name": "Арматура А500 Ø12", "quantity": 2, "unit": "т"}],
-        "schedule_risks": [{"description": "Нет крана на завтра", "severity": "high"}],
-    },
-    ensure_ascii=False,
+from tests.helpers import (
+    REPORT_JSON,
+    TG_USER_ID,
+    FailingTranscriber,
+    FakeTranscriber,
+    callback_update,
+    edited_update,
+    fake_openai,
+    make_update,
+    msg_ids,
+    register_owner_with_site,
 )
-
-
-@pytest.fixture
-def tg() -> MockedSession:
-    return MockedSession(files={"voice-file": b"OggS-fake-voice", "photo-file": b"jpeg-bytes"})
-
-
-@pytest.fixture
-def bot(tg: MockedSession) -> Bot:
-    return Bot("123456:TEST", session=tg)
 
 
 async def test_full_flow(sessionmaker, settings, bot, tg, tmp_path):
@@ -326,8 +200,8 @@ async def test_manager_creates_site_invite(sessionmaker, settings, bot, tg):
 
 async def _seed_entry(sessionmaker, **kw) -> int:
     async with sessionmaker() as s:
-        company = Company(name="C", invite_code=f"c{next(_msg_ids)}")
-        user = User(tg_id=next(_msg_ids), company=company)
+        company = Company(name="C", invite_code=f"c{next(msg_ids)}")
+        user = User(tg_id=next(msg_ids), company=company)
         s.add_all([company, user])
         await s.flush()
         entry = Entry(
@@ -337,7 +211,7 @@ async def _seed_entry(sessionmaker, **kw) -> int:
             work_date=date(2026, 9, 30),
             sent_at=datetime.now(UTC),
             tg_chat_id=TG_USER_ID,
-            tg_message_id=next(_msg_ids),
+            tg_message_id=next(msg_ids),
             tg_file_id="voice-file",
             **kw,
         )
@@ -391,26 +265,6 @@ async def test_worker_retries_then_fails(sessionmaker, bot, tg, tmp_path):
         entry = await s.get(Entry, entry_id)
     assert entry.status == EntryStatus.FAILED
     assert "Не получилось расшифровать" in tg.sent_texts()[-1]
-
-
-def edited_update(message_id: int, **message_fields: Any) -> Update:
-    message = {
-        "message_id": message_id,
-        "date": int(datetime.now(UTC).timestamp()),
-        "edit_date": int(datetime.now(UTC).timestamp()),
-        "chat": {"id": TG_USER_ID, "type": "private"},
-        "from": {"id": TG_USER_ID, "is_bot": False, "first_name": "Иван"},
-        **message_fields,
-    }
-    return Update.model_validate({"update_id": next(_msg_ids), "edited_message": message})
-
-
-async def register_owner_with_site(dp, bot, site_name: str = "ЖК Северный") -> None:
-    await dp.feed_update(bot, make_update(text="/start"))
-    await dp.feed_update(bot, callback_update("consent:accept"))
-    await dp.feed_update(bot, make_update(text="ООО Стройка"))
-    await dp.feed_update(bot, make_update(text="/new_object"))
-    await dp.feed_update(bot, make_update(text=site_name))
 
 
 async def test_transcript_fix_by_reply_and_edited_message(

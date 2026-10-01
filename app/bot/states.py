@@ -7,3 +7,8 @@ class Registration(StatesGroup):
 
 class SiteCreation(StatesGroup):
     name = State()
+
+
+class SiteEdit(StatesGroup):
+    name = State()
+    address = State()
