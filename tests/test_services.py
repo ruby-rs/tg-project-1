@@ -119,3 +119,9 @@ async def test_llm_gives_up_after_repair_attempts():
     llm = LLMClient(fake_openai(["мусор", "снова мусор"]), model="m", json_mode=False)
     with pytest.raises(LLMError):
         await llm.complete_json("sys", "user", SiteDailyReport)
+
+
+def test_llm_project_header_from_settings(settings):
+    settings.llm_project = "b1gfolder"
+    llm = LLMClient.from_settings(settings)
+    assert llm._client.default_headers["OpenAI-Project"] == "b1gfolder"

@@ -51,6 +51,7 @@ free -h && df -h /                            # хватит ли памяти �
 | Docker (шаг 2) | Повторная установка не нужна | Пропустите, только добавьте `deploy` в группу `docker` |
 | `daemon.json` (шаги 2–3) | Команды ниже перезаписывают файл целиком, а перезапуск Docker перезапускает все контейнеры | Допишите нужные ключи в существующий файл и перезапускайте Docker в спокойное время |
 | Память | Whisper и сборка образа конкурируют с другими проектами | Смотрите `free -h`; при нехватке — swap или модель Whisper `base` |
+| Сервер 1–2 vCPU / 2 ГБ | Ollama не поместится, Whisper будет медленным | LLM только по внешнему API, `WORKER_CONCURRENCY=1`, Whisper `small` (при нехватке памяти — `base`) |
 
 Конфликтов по портам и именам у этого проекта нет: он ничего не публикует наружу,
 а контейнеры и тома получают префикс по имени каталога (`prorab-bot`).
@@ -250,6 +251,7 @@ nano .env
 ```ini
 LLM_BASE_URL=https://llm.api.cloud.yandex.net/v1
 LLM_API_KEY=<API-ключ сервисного аккаунта с ролью ai.languageModels.user>
+LLM_PROJECT=<folder_id>
 LLM_MODEL=gpt://<folder_id>/yandexgpt/latest
 LLM_VISION_MODEL=
 ```
