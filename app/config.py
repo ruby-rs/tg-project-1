@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     # Сообщения, отправленные до этого часа, относятся к предыдущему рабочему дню
     work_day_start_hour: int = Field(default=0, ge=0, le=23)
     log_level: str = "INFO"
+    # Хранилище состояний диалогов (FSM); пусто — в памяти, сбрасывается при рестарте
+    redis_url: str | None = None
+    # Ошибки в Sentry или совместимый сервис (GlitchTip); пусто — выключено
+    sentry_dsn: str | None = None
+    sentry_environment: str = "production"
 
     # --- Персональные данные (152-ФЗ) ---
     # Оператор ПДн для текста согласия, например «ООО Ромашка, ИНН 7700000000, г. Москва, ...»
@@ -69,6 +74,8 @@ class Settings(BaseSettings):
             "pd_operator",
             "privacy_policy_url",
             "support_contact",
+            "redis_url",
+            "sentry_dsn",
         ):
             if getattr(self, name) == "":
                 setattr(self, name, None)

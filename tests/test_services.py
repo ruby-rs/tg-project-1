@@ -125,3 +125,51 @@ def test_llm_project_header_from_settings(settings):
     settings.llm_project = "b1gfolder"
     llm = LLMClient.from_settings(settings)
     assert llm._client.default_headers["OpenAI-Project"] == "b1gfolder"
+
+
+def test_storage_is_memory_without_redis(settings):
+    from aiogram.fsm.storage.memory import MemoryStorage
+
+    from app.bot.app import build_storage
+
+    assert isinstance(build_storage(settings), MemoryStorage)
+
+
+async def test_redis_storage_keeps_state(settings):
+    """Состояние диалога переживает пересоздание хранилища (рестарт бота)."""
+    import os
+
+    from aiogram.fsm.storage.base import StorageKey
+
+    from app.bot.app import build_storage
+
+    url = os.environ.get("TEST_REDIS_URL")
+    if not url:
+        pytest.skip("TEST_REDIS_URL не задан")
+    settings.redis_url = url
+    key = StorageKey(bot_id=1, chat_id=555, user_id=555)
+
+    storage = build_storage(settings)
+    await storage.set_state(key, "Registration:company_name")
+    await storage.close()
+
+    storage = build_storage(settings)
+    assert await storage.get_state(key) == "Registration:company_name"
+    await storage.set_state(key, None)
+    await storage.close()
+
+
+def test_sentry_is_off_without_dsn(settings, monkeypatch):
+    import sentry_sdk
+
+    from app.observability import setup_sentry
+
+    called = []
+    monkeypatch.setattr(sentry_sdk, "init", lambda **kw: called.append(kw))
+    setup_sentry(settings, "bot")
+    assert called == []
+
+    settings.sentry_dsn = "https://key@sentry.example/1"
+    setup_sentry(settings, "worker")
+    assert called[0]["send_default_pii"] is False
+    assert called[0]["server_name"] == "worker"

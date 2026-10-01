@@ -17,6 +17,8 @@ dependencies = [
     "pydantic-settings>=2.3",
     "openai>=1.40",
     "pillow>=10.4",
+    "redis>=5",
+    "sentry-sdk>=2",
 ]
 
 [project.optional-dependencies]

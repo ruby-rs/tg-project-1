@@ -5,6 +5,7 @@ import asyncio
 
 from app.config import get_settings
 from app.logging_setup import setup_logging
+from app.observability import setup_sentry
 
 
 def main() -> None:
@@ -14,6 +15,7 @@ def main() -> None:
 
     settings = get_settings()
     setup_logging(settings.log_level)
+    setup_sentry(settings, args.component)
 
     if args.component == "bot":
         from app.bot.app import run_bot

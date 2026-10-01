@@ -25,6 +25,19 @@ services:
       retries: 10
     restart: unless-stopped
 
+  redis:
+    image: redis:7-alpine
+    # Только состояния диалогов бота: данных мало, ограничиваем память
+    command: ["redis-server", "--save", "60", "1", "--maxmemory", "64mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
   migrate:
     <<: *app
     command: ["alembic", "upgrade", "head"]
@@ -36,9 +49,14 @@ services:
   bot:
     <<: *app
     command: ["python", "-m", "app", "bot"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-foreman}:${POSTGRES_PASSWORD:-foreman}@db:5432/${POSTGRES_DB:-foreman}
+      REDIS_URL: redis://redis:6379/0
     depends_on:
       migrate:
         condition: service_completed_successfully
+      redis:
+        condition: service_healthy
 
   worker:
     <<: *app
@@ -54,3 +72,4 @@ volumes:
   pgdata:
   media:  # архив фото и голосовых — обязательно включить в бэкап
   models: # кеш моделей Whisper
+  redisdata:
