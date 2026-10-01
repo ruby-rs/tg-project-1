@@ -218,6 +218,10 @@ git checkout feature/mvp
 
 ## 5. Настройка `.env`
 
+> Строки вида `ПЕРЕМЕННАЯ=значение` из этого и следующих шагов нужно вписывать
+> в файл `.env` (через `nano .env`), а не вводить в терминал: введённые в терминал,
+> они пропадут при выходе из сессии и на бота не повлияют.
+
 ```bash
 cp .env.example .env
 chmod 600 .env
@@ -275,6 +279,10 @@ cat > docker-compose.override.yml <<'EOF'
 services:
   ollama:
     image: ollama/ollama:latest
+    environment:
+      # Промпт отчёта со схемой — около 2–3 тыс. токенов плюс сообщения за день.
+      # Окно контекста Ollama по умолчанию меньше, и промпт молча обрезается.
+      OLLAMA_CONTEXT_LENGTH: "8192"
     volumes:
       - ollama:/root/.ollama
     restart: unless-stopped
