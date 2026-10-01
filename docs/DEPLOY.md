@@ -184,17 +184,30 @@ cat ~/.ssh/github_deploy.pub
 Скопируйте выведенный ключ в GitHub: репозиторий → **Settings → Deploy keys →
 Add deploy key**, галочку «Allow write access» **не** ставьте.
 
+Ключ подключается через отдельный псевдоним хоста `github-prorab`, а не через
+`Host github.com`. Deploy key даёт доступ только к одному репозиторию, и общая
+настройка для `github.com` сломала бы `git pull` у других проектов на сервере.
+
 ```bash
 cat >> ~/.ssh/config <<'EOF'
-Host github.com
+
+Host github-prorab
+  HostName github.com
+  User git
   IdentityFile ~/.ssh/github_deploy
   IdentitiesOnly yes
 EOF
+chmod 600 ~/.ssh/config
 
-sudo mkdir -p /opt/prorab-bot && sudo chown deploy:deploy /opt/prorab-bot
-git clone git@github.com:ruby-rs/tg-project-1.git /opt/prorab-bot
+ssh -T github-prorab   # ответ: Hi ruby-rs/tg-project-1! You've successfully authenticated...
+
+sudo mkdir -p /opt/prorab-bot && sudo chown "$USER": /opt/prorab-bot
+git clone github-prorab:ruby-rs/tg-project-1.git /opt/prorab-bot
 cd /opt/prorab-bot
 ```
+
+Ключ должен лежать у того пользователя, под которым вы клонируете и обновляете
+проект (`deploy` или `root`).
 
 Пока PR с MVP не влит в `main`, переключитесь на ветку с кодом:
 
