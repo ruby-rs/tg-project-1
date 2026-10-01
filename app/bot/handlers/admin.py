@@ -12,6 +12,7 @@ from aiogram.utils.deep_linking import create_start_link
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot.commands import sync_user_commands
 from app.bot.filters import IsManager
 from app.bot.handlers.start import SITE_INVITE_PREFIX
 from app.bot.states import SiteEdit
@@ -314,6 +315,7 @@ async def on_team_action(
             await call.answer("Менять роли может только владелец", show_alert=True)
             return
         target.role = UserRole.MANAGER if action == "promote" else UserRole.FOREMAN
+        await sync_user_commands(bot, target)
         await _notify(
             bot,
             target,
@@ -336,6 +338,7 @@ async def on_team_action(
     elif action == "remove_ok":
         name = escape(target.full_name)
         await users.remove_from_company(target)
+        await sync_user_commands(bot, target)
         await _notify(bot, target, f"Вас удалили из компании «{company_name}».")
         remaining = await users.list_company(user.company_id)
         await _edit_or_answer(call, f"✅ {name} удалён из компании.", _team_list_markup(remaining))

@@ -5,29 +5,15 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.base import BaseStorage
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import BotCommand
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.bot.commands import set_default_commands, sync_all_managers
 from app.bot.handlers import get_routers
 from app.bot.middlewares import DbSessionMiddleware, UserMiddleware
 from app.config import Settings
 from app.db.session import create_engine, create_sessionmaker
 
 log = logging.getLogger(__name__)
-
-COMMANDS = [
-    BotCommand(command="object", description="Выбрать объект"),
-    BotCommand(command="report", description="Отчёт за день"),
-    BotCommand(command="new_object", description="Добавить объект"),
-    BotCommand(command="archive", description="Архив объекта"),
-    BotCommand(command="invite", description="Пригласить прораба"),
-    BotCommand(command="sites", description="Управление объектами"),
-    BotCommand(command="team", description="Команда"),
-    BotCommand(command="settings", description="Сводка и напоминания"),
-    BotCommand(command="stats", description="Статистика"),
-    BotCommand(command="help", description="Как пользоваться"),
-    BotCommand(command="privacy", description="Персональные данные"),
-]
 
 
 def build_storage(settings: Settings) -> BaseStorage:
@@ -63,7 +49,8 @@ async def run_bot(settings: Settings) -> None:
     dp = build_dispatcher(settings, sessionmaker, build_storage(settings))
 
     try:
-        await bot.set_my_commands(COMMANDS)
+        await set_default_commands(bot)
+        await sync_all_managers(bot, sessionmaker)
         await bot.delete_webhook(drop_pending_updates=False)
         me = await bot.get_me()
         log.info("Бот @%s запущен", me.username)

@@ -12,6 +12,7 @@ from aiogram import Bot
 from aiogram.client.session.base import BaseSession
 from aiogram.methods import (
     AnswerCallbackQuery,
+    DeleteMyCommands,
     EditMessageReplyMarkup,
     EditMessageText,
     GetFile,
@@ -20,6 +21,7 @@ from aiogram.methods import (
     SendDocument,
     SendMessage,
     SetMessageReaction,
+    SetMyCommands,
     TelegramMethod,
 )
 from aiogram.types import Chat, File, Message, Update
@@ -59,7 +61,14 @@ class MockedSession(BaseSession):
                 chat=Chat(id=method.chat_id, type="private"),
                 text=method.text,
             )
-        if isinstance(method, SetMessageReaction | SendChatAction | AnswerCallbackQuery):
+        if isinstance(
+            method,
+            SetMessageReaction
+            | SendChatAction
+            | AnswerCallbackQuery
+            | SetMyCommands
+            | DeleteMyCommands,
+        ):
             return True
         if isinstance(method, EditMessageText | EditMessageReplyMarkup):
             return True
