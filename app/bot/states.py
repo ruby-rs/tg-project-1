@@ -12,3 +12,8 @@ class SiteCreation(StatesGroup):
 class SiteEdit(StatesGroup):
     name = State()
     address = State()
+
+
+class CompanySettings(StatesGroup):
+    digest_time = State()
+    reminder_time = State()

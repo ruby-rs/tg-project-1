@@ -11,6 +11,7 @@ from app.db.models import (
     Entry,
     EntryStatus,
     ReportJob,
+    ScheduledRun,
     Site,
     SiteMember,
     User,
@@ -51,6 +52,25 @@ class UserRepo:
             select(User).where(User.company_id == company_id).order_by(role_order, User.full_name)
         )
         return list(result)
+
+    async def foremen_to_remind(self, company_id: int, work_date: date) -> list[tuple[User, Site]]:
+        """Прорабы с текущим объектом, которые за день не прислали ни одного сообщения."""
+        sent_today = select(Entry.id).where(Entry.user_id == User.id, Entry.work_date == work_date)
+        result = await self.session.execute(
+            select(User, Site)
+            .join(Site, Site.id == User.current_site_id)
+            .where(
+                User.company_id == company_id,
+                User.role == UserRole.FOREMAN,
+                User.consent_at.is_not(None),
+                Site.is_active.is_(True),
+                ~sent_today.exists(),
+            )
+        )
+        return [(u, s) for u, s in result.all()]
+
+    async def managers_with_consent(self, company_id: int) -> list[User]:
+        return [m for m in await self.list_managers(company_id) if m.consent_at is not None]
 
     async def get_in_company(self, company_id: int, user_id: int) -> User | None:
         return await self.session.scalar(
@@ -252,7 +272,10 @@ class EntryRepo:
 
 
 async def claim_jobs(
-    session: AsyncSession, model: type[Entry] | type[ReportJob], limit: int, stale_after: int
+    session: AsyncSession,
+    model: type[Entry] | type[ReportJob] | type[ScheduledRun],
+    limit: int,
+    stale_after: int,
 ) -> list[int]:
     """Забирает задачи очереди в работу. SKIP LOCKED позволяет запускать несколько воркеров.
 
@@ -313,9 +336,40 @@ class ReportJobRepo:
         return await claim_jobs(self.session, ReportJob, limit, stale_after)
 
 
+class ScheduledRunRepo:
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def create(self, company_id: int, kind: str, work_date: date) -> bool:
+        """Ставит рассылку на день. False — она уже была (или стоит в очереди)."""
+        stmt = (
+            pg_insert(ScheduledRun)
+            .values(
+                company_id=company_id,
+                kind=kind,
+                work_date=work_date,
+                status=EntryStatus.PENDING,
+                attempts=0,
+            )
+            .on_conflict_do_nothing(constraint="uq_scheduled_runs_day")
+            .returning(ScheduledRun.id)
+        )
+        return await self.session.scalar(stmt) is not None
+
+    async def claim_batch(self, limit: int, stale_after: int) -> list[int]:
+        return await claim_jobs(self.session, ScheduledRun, limit, stale_after)
+
+
 class ReportRepo:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
+
+    async def get(self, site_id: int, work_date: date) -> DailyReport | None:
+        return await self.session.scalar(
+            select(DailyReport).where(
+                DailyReport.site_id == site_id, DailyReport.work_date == work_date
+            )
+        )
 
     async def upsert(
         self, site_id: int, work_date: date, data: dict, model: str, entries_count: int

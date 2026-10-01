@@ -16,6 +16,7 @@ from app.services.transcription import build_transcriber
 from app.worker.processor import EntryProcessor
 from app.worker.reports import ReportQueue
 from app.worker.runner import EntryQueue, run_queue
+from app.worker.scheduled import ScheduledQueue, run_scheduler
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +41,9 @@ async def run_worker(settings: Settings) -> None:
         max_attempts=settings.worker_max_attempts,
         stale_after=settings.worker_stale_after,
     )
-    reports = ReportQueue(sessionmaker, bot, ReportService(llm))
+    report_service = ReportService(llm)
+    reports = ReportQueue(sessionmaker, bot, report_service)
+    scheduled = ScheduledQueue(sessionmaker, bot, report_service)
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -62,6 +65,9 @@ async def run_worker(settings: Settings) -> None:
                 concurrency=settings.report_concurrency,
                 poll_interval=settings.worker_poll_interval,
             ),
+            # Вечерние сводки и напоминания: по одной рассылке за раз
+            run_queue(scheduled, stop, concurrency=1, poll_interval=settings.worker_poll_interval),
+            run_scheduler(sessionmaker, stop, day_start_hour=settings.work_day_start_hour),
         )
     finally:
         await bot.session.close()

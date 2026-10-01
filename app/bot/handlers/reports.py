@@ -1,6 +1,7 @@
 """Запрос отчёта. Сам отчёт собирает воркер (app/worker/reports.py) и присылает в чат."""
 
-from datetime import timedelta
+from collections import Counter
+from datetime import date, timedelta
 from html import escape
 
 from aiogram import Bot, Router
@@ -9,10 +10,12 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.filters import HasCompany
-from app.bot.keyboards import ReportSite, report_sites_keyboard
+from app.bot.keyboards import ReportSite, ReportView, report_sites_keyboard
 from app.config import Settings
 from app.db.models import Site, User
-from app.db.repositories import ReportJobRepo, SiteRepo
+from app.db.repositories import EntryRepo, ReportJobRepo, ReportRepo, SiteRepo
+from app.reports.render import render_report, split_message
+from app.reports.schema import SiteDailyReport
 from app.timeutils import today_for
 
 router = Router(name="reports")
@@ -97,3 +100,27 @@ async def on_report_site(
     await call.answer()
     chat_id = call.message.chat.id if call.message else call.from_user.id
     await request_report(bot, chat_id, site, callback_data.days_ago, user, session, settings)
+
+
+@router.callback_query(ReportView.filter())
+async def on_report_view(
+    call: CallbackQuery, callback_data: ReportView, bot: Bot, user: User, session: AsyncSession
+) -> None:
+    """Сохранённый отчёт объекта за день — по кнопке под вечерней сводкой, без запроса к LLM."""
+    site = await SiteRepo(session).get_for_user(user, callback_data.site_id)
+    work_date = date.fromordinal(callback_data.day)
+    saved = await ReportRepo(session).get(site.id, work_date) if site else None
+    if site is None or saved is None:
+        await call.answer("Отчёт не найден", show_alert=True)
+        return
+    entries = await EntryRepo(session).for_report(site.id, work_date)
+    text = render_report(
+        SiteDailyReport.model_validate(saved.data),
+        site.name,
+        work_date,
+        Counter(e.kind for e in entries),
+    )
+    await call.answer()
+    chat_id = call.message.chat.id if call.message else call.from_user.id
+    for chunk in split_message(text):
+        await bot.send_message(chat_id, chunk)

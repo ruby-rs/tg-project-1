@@ -1,6 +1,15 @@
 from aiogram import Router
 
-from app.bot.handlers import admin, consent, fallback, intake, reports, sites, start
+from app.bot.handlers import (
+    admin,
+    consent,
+    fallback,
+    intake,
+    reports,
+    settings,
+    sites,
+    start,
+)
 
 
 def get_routers() -> list[Router]:
@@ -10,6 +19,7 @@ def get_routers() -> list[Router]:
         consent.router,
         start.router,
         admin.router,
+        settings.router,
         sites.router,
         reports.router,
         intake.router,
