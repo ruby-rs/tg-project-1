@@ -24,6 +24,7 @@ COMMANDS = [
     BotCommand(command="sites", description="Управление объектами"),
     BotCommand(command="team", description="Команда"),
     BotCommand(command="settings", description="Сводка и напоминания"),
+    BotCommand(command="stats", description="Статистика"),
     BotCommand(command="help", description="Как пользоваться"),
     BotCommand(command="privacy", description="Персональные данные"),
 ]

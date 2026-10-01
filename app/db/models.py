@@ -273,6 +273,24 @@ class ExportJob(Base):
     site: Mapped[Site] = relationship()
 
 
+class ReportFeedback(Base):
+    """Оценка отчёта пользователем — основная метрика качества на пилоте."""
+
+    __tablename__ = "report_feedback"
+    __table_args__ = (
+        UniqueConstraint("site_id", "work_date", "user_id", name="uq_report_feedback_user"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    site_id: Mapped[int] = mapped_column(ForeignKey("sites.id", ondelete="CASCADE"))
+    work_date: Mapped[date]
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    rating: Mapped[int] = mapped_column(Integer)  # 1 — полезно, -1 — есть ошибки
+    comment: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
+
+
 class ScheduledKind(StrEnum):
     DIGEST = "digest"  # вечерняя сводка руководителям
     REMINDER = "reminder"  # напоминание прорабам без сообщений за день

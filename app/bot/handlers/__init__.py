@@ -5,6 +5,7 @@ from app.bot.handlers import (
     archive,
     consent,
     fallback,
+    feedback,
     intake,
     reports,
     settings,
@@ -24,6 +25,7 @@ def get_routers() -> list[Router]:
         sites.router,
         reports.router,
         archive.router,
+        feedback.router,
         intake.router,
         fallback.router,
     ]

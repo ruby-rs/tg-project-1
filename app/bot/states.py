@@ -17,3 +17,7 @@ class SiteEdit(StatesGroup):
 class CompanySettings(StatesGroup):
     digest_time = State()
     reminder_time = State()
+
+
+class FeedbackComment(StatesGroup):
+    text = State()

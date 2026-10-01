@@ -68,3 +68,18 @@ def digest_keyboard(sites: Sequence[tuple[int, str]], work_date: date) -> Inline
         )
     kb.adjust(1)
     return kb.as_markup()
+
+
+class Feedback(CallbackData, prefix="fb"):
+    site_id: int
+    day: int  # date.toordinal()
+    rating: int  # 1 | -1
+
+
+def feedback_keyboard(site_id: int, work_date: date) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    day = work_date.toordinal()
+    kb.button(text="👍 Полезно", callback_data=Feedback(site_id=site_id, day=day, rating=1))
+    kb.button(text="👎 Есть ошибки", callback_data=Feedback(site_id=site_id, day=day, rating=-1))
+    kb.adjust(2)
+    return kb.as_markup()

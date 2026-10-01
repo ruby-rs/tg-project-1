@@ -10,7 +10,7 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.filters import HasCompany
-from app.bot.keyboards import ReportSite, ReportView, report_sites_keyboard
+from app.bot.keyboards import ReportSite, ReportView, feedback_keyboard, report_sites_keyboard
 from app.config import Settings
 from app.db.models import Site, User
 from app.db.repositories import EntryRepo, ReportJobRepo, ReportRepo, SiteRepo
@@ -122,5 +122,8 @@ async def on_report_view(
     )
     await call.answer()
     chat_id = call.message.chat.id if call.message else call.from_user.id
-    for chunk in split_message(text):
-        await bot.send_message(chat_id, chunk)
+    chunks = split_message(text)
+    for i, chunk in enumerate(chunks):
+        last = i == len(chunks) - 1
+        markup = feedback_keyboard(site.id, work_date) if last else None
+        await bot.send_message(chat_id, chunk, reply_markup=markup)

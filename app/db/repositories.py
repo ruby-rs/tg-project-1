@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import date, timedelta
 
 from sqlalchemy import Select, and_, case, delete, func, or_, select, update
@@ -6,11 +7,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
 from app.db.models import (
+    AUDIO_KINDS,
     Company,
     DailyReport,
     Entry,
     EntryStatus,
     ExportJob,
+    ReportFeedback,
     ReportJob,
     ScheduledRun,
     Site,
@@ -267,6 +270,15 @@ class EntryRepo:
         )
         return list(result)
 
+    async def retry_failed(self, company_id: int) -> int:
+        """Вернуть в очередь сообщения, обработка которых упала (Whisper был недоступен и т.п.)."""
+        result = await self.session.execute(
+            update(Entry)
+            .where(Entry.company_id == company_id, Entry.status == EntryStatus.FAILED)
+            .values(status=EntryStatus.PENDING, attempts=0, next_attempt_at=None)
+        )
+        return result.rowcount or 0
+
     async def count_unprocessed(self, site_id: int, work_date: date) -> int:
         return (
             await self.session.scalar(
@@ -427,3 +439,162 @@ class ReportRepo:
             },
         )
         await self.session.execute(stmt)
+
+
+class FeedbackRepo:
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def rate(self, site_id: int, work_date: date, user_id: int, rating: int) -> None:
+        stmt = pg_insert(ReportFeedback).values(
+            site_id=site_id, work_date=work_date, user_id=user_id, rating=rating
+        )
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_report_feedback_user",
+            set_={"rating": stmt.excluded.rating, "updated_at": func.now()},
+        )
+        await self.session.execute(stmt)
+
+    async def comment(self, site_id: int, work_date: date, user_id: int, text: str) -> None:
+        await self.session.execute(
+            update(ReportFeedback)
+            .where(
+                ReportFeedback.site_id == site_id,
+                ReportFeedback.work_date == work_date,
+                ReportFeedback.user_id == user_id,
+            )
+            .values(comment=text[:2000], updated_at=func.now())
+        )
+
+
+@dataclass(slots=True)
+class CompanyStats:
+    date_from: date
+    date_to: date
+    kinds: dict[str, int]
+    voices: int
+    transcribed: int
+    corrected: int
+    unprocessed: int
+    failed: int
+    reports_done: int
+    reports_failed: int
+    report_avg_seconds: float | None
+    likes: int
+    dislikes: int
+    comments: list[str]
+    activity: list[tuple[str, int]]  # прораб — сколько дней присылал сообщения
+
+
+class StatsRepo:
+    """Метрики пилота: насколько хорошо работает расшифровка и полезны ли отчёты."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def collect(self, company_id: int, date_from: date, date_to: date) -> CompanyStats:
+        in_range = and_(
+            Entry.company_id == company_id,
+            Entry.work_date >= date_from,
+            Entry.work_date <= date_to,
+        )
+        kinds = dict(
+            (
+                await self.session.execute(
+                    select(Entry.kind, func.count()).where(in_range).group_by(Entry.kind)
+                )
+            ).all()
+        )
+        audio = and_(in_range, Entry.kind.in_(list(AUDIO_KINDS)))
+        voices, transcribed, corrected = (
+            await self.session.execute(
+                select(
+                    func.count(),
+                    func.count().filter(
+                        and_(Entry.transcript.is_not(None), Entry.transcript != "")
+                    ),
+                    func.count().filter(Entry.transcript_original.is_not(None)),
+                ).where(audio)
+            )
+        ).one()
+        unprocessed, failed = (
+            await self.session.execute(
+                select(
+                    func.count().filter(
+                        Entry.status.in_([EntryStatus.PENDING, EntryStatus.PROCESSING])
+                    ),
+                    func.count().filter(Entry.status == EntryStatus.FAILED),
+                ).where(Entry.company_id == company_id)
+            )
+        ).one()
+
+        company_sites = select(Site.id).where(Site.company_id == company_id)
+        jobs_in_range = and_(
+            ReportJob.site_id.in_(company_sites),
+            ReportJob.work_date >= date_from,
+            ReportJob.work_date <= date_to,
+        )
+        reports_done, reports_failed, avg_seconds = (
+            await self.session.execute(
+                select(
+                    func.count().filter(ReportJob.status == EntryStatus.DONE),
+                    func.count().filter(ReportJob.status == EntryStatus.FAILED),
+                    func.avg(
+                        func.extract("epoch", ReportJob.finished_at - ReportJob.created_at)
+                    ).filter(ReportJob.status == EntryStatus.DONE),
+                ).where(jobs_in_range)
+            )
+        ).one()
+
+        fb_in_range = and_(
+            ReportFeedback.site_id.in_(company_sites),
+            ReportFeedback.work_date >= date_from,
+            ReportFeedback.work_date <= date_to,
+        )
+        likes, dislikes = (
+            await self.session.execute(
+                select(
+                    func.count().filter(ReportFeedback.rating > 0),
+                    func.count().filter(ReportFeedback.rating < 0),
+                ).where(fb_in_range)
+            )
+        ).one()
+        comments = list(
+            await self.session.scalars(
+                select(ReportFeedback.comment)
+                .where(fb_in_range, ReportFeedback.comment.is_not(None))
+                .order_by(ReportFeedback.updated_at.desc())
+                .limit(3)
+            )
+        )
+
+        days = func.count(func.distinct(Entry.work_date))
+        activity = [
+            (name, n)
+            for name, n in (
+                await self.session.execute(
+                    select(User.full_name, days)
+                    .outerjoin(Entry, and_(Entry.user_id == User.id, in_range))
+                    .where(User.company_id == company_id, User.role == UserRole.FOREMAN)
+                    .group_by(User.id, User.full_name)
+                    .order_by(days.desc(), User.full_name)
+                )
+            ).all()
+        ]
+        return CompanyStats(
+            date_from=date_from,
+            date_to=date_to,
+            kinds=kinds,
+            voices=voices,
+            transcribed=transcribed,
+            corrected=corrected,
+            unprocessed=unprocessed,
+            failed=failed,
+            reports_done=reports_done,
+            reports_failed=reports_failed,
+            report_avg_seconds=float(avg_seconds) if avg_seconds is not None else None,
+            likes=likes,
+            dislikes=dislikes,
+            comments=comments,
+            activity=activity,
+        )

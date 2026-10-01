@@ -7,6 +7,7 @@ from aiogram.enums import ChatAction
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import joinedload
 
+from app.bot.keyboards import feedback_keyboard
 from app.db.models import EntryStatus, ReportJob, Site
 from app.db.repositories import EntryRepo, ReportJobRepo
 from app.reports.render import split_message
@@ -102,8 +103,11 @@ class ReportQueue:
             text = f"За {job.work_date:%d.%m.%Y} по объекту «{escape(site.name)}» сообщений нет."
             await self._send(job.chat_id, text)
             return
-        for chunk in split_message(result.render(site.name, job.work_date)):
-            await self._send(job.chat_id, chunk)
+        chunks = split_message(result.render(site.name, job.work_date))
+        for i, chunk in enumerate(chunks):
+            last = i == len(chunks) - 1
+            markup = feedback_keyboard(site.id, job.work_date) if last else None
+            await self._send(job.chat_id, chunk, markup)
 
     async def _typing(self, chat_id: int) -> None:
         try:
@@ -111,8 +115,8 @@ class ReportQueue:
         except Exception:
             log.debug("Не удалось отправить «печатает» в чат %s", chat_id)
 
-    async def _send(self, chat_id: int, text: str) -> None:
+    async def _send(self, chat_id: int, text: str, markup=None) -> None:
         try:
-            await self._bot.send_message(chat_id, text)
+            await self._bot.send_message(chat_id, text, reply_markup=markup)
         except Exception:
             log.exception("Не удалось отправить отчёт в чат %s", chat_id)
