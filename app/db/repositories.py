@@ -10,6 +10,7 @@ from app.db.models import (
     DailyReport,
     Entry,
     EntryStatus,
+    ExportJob,
     ReportJob,
     ScheduledRun,
     Site,
@@ -253,6 +254,19 @@ class EntryRepo:
         )
         return list(result)
 
+    async def for_export(self, site_id: int, date_from: date, date_to: date) -> list[Entry]:
+        result = await self.session.scalars(
+            select(Entry)
+            .options(joinedload(Entry.user))
+            .where(
+                Entry.site_id == site_id,
+                Entry.work_date >= date_from,
+                Entry.work_date <= date_to,
+            )
+            .order_by(Entry.sent_at, Entry.id)
+        )
+        return list(result)
+
     async def count_unprocessed(self, site_id: int, work_date: date) -> int:
         return (
             await self.session.scalar(
@@ -273,7 +287,7 @@ class EntryRepo:
 
 async def claim_jobs(
     session: AsyncSession,
-    model: type[Entry] | type[ReportJob] | type[ScheduledRun],
+    model: type[Entry] | type[ReportJob] | type[ScheduledRun] | type[ExportJob],
     limit: int,
     stale_after: int,
 ) -> list[int]:
@@ -334,6 +348,28 @@ class ReportJobRepo:
 
     async def claim_batch(self, limit: int, stale_after: int) -> list[int]:
         return await claim_jobs(self.session, ReportJob, limit, stale_after)
+
+
+class ExportJobRepo:
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def enqueue(
+        self, site_id: int, date_from: date, date_to: date, chat_id: int, user_id: int
+    ) -> None:
+        self.session.add(
+            ExportJob(
+                site_id=site_id,
+                date_from=date_from,
+                date_to=date_to,
+                chat_id=chat_id,
+                user_id=user_id,
+            )
+        )
+        await self.session.flush()
+
+    async def claim_batch(self, limit: int, stale_after: int) -> list[int]:
+        return await claim_jobs(self.session, ExportJob, limit, stale_after)
 
 
 class ScheduledRunRepo:

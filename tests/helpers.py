@@ -17,6 +17,7 @@ from aiogram.methods import (
     GetFile,
     GetMe,
     SendChatAction,
+    SendDocument,
     SendMessage,
     SetMessageReaction,
     TelegramMethod,
@@ -31,6 +32,7 @@ class MockedSession(BaseSession):
     def __init__(self, files: dict[str, bytes] | None = None) -> None:
         super().__init__()
         self.requests: list[TelegramMethod[Any]] = []
+        self.documents: list[tuple[str, bytes]] = []
         self.files = files or {}
 
     async def make_request(self, bot: Bot, method: TelegramMethod[Any], timeout: int | None = None):
@@ -39,6 +41,17 @@ class MockedSession(BaseSession):
             return TgUser(id=123456, is_bot=True, first_name="Bot", username="prorab_test_bot")
         if isinstance(method, GetFile):
             return File(file_id=method.file_id, file_unique_id="u", file_path=method.file_id)
+        if isinstance(method, SendDocument):
+            path = method.document.path
+            # Временный файл удалят сразу после отправки — забираем содержимое сейчас
+            data = Path(path).read_bytes()  # noqa: ASYNC240
+            self.documents.append((method.document.filename, data))
+            return Message(
+                message_id=10_000 + len(self.requests),
+                date=datetime.now(UTC),
+                chat=Chat(id=method.chat_id, type="private"),
+                caption=method.caption,
+            )
         if isinstance(method, SendMessage):
             return Message(
                 message_id=10_000 + len(self.requests),

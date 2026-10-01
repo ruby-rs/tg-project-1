@@ -2,6 +2,7 @@ from aiogram import Router
 
 from app.bot.handlers import (
     admin,
+    archive,
     consent,
     fallback,
     intake,
@@ -22,6 +23,7 @@ def get_routers() -> list[Router]:
         settings.router,
         sites.router,
         reports.router,
+        archive.router,
         intake.router,
         fallback.router,
     ]

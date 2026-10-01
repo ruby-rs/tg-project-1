@@ -13,6 +13,7 @@ from app.services.photos import PhotoDescriber
 from app.services.reports import ReportService
 from app.services.storage import LocalFileStorage
 from app.services.transcription import build_transcriber
+from app.worker.exports import ExportQueue
 from app.worker.processor import EntryProcessor
 from app.worker.reports import ReportQueue
 from app.worker.runner import EntryQueue, run_queue
@@ -29,9 +30,10 @@ async def run_worker(settings: Settings) -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     llm = LLMClient.from_settings(settings)
+    storage = LocalFileStorage(settings.media_root)
     processor = EntryProcessor(
         bot=bot,
-        storage=LocalFileStorage(settings.media_root),
+        storage=storage,
         transcriber=build_transcriber(settings),
         describer=PhotoDescriber(llm) if settings.llm_vision_model else None,
     )
@@ -44,6 +46,7 @@ async def run_worker(settings: Settings) -> None:
     report_service = ReportService(llm)
     reports = ReportQueue(sessionmaker, bot, report_service)
     scheduled = ScheduledQueue(sessionmaker, bot, report_service)
+    exports = ExportQueue(sessionmaker, bot, storage)
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -67,6 +70,8 @@ async def run_worker(settings: Settings) -> None:
             ),
             # Вечерние сводки и напоминания: по одной рассылке за раз
             run_queue(scheduled, stop, concurrency=1, poll_interval=settings.worker_poll_interval),
+            # Выгрузка архива нагружает диск — по одной за раз
+            run_queue(exports, stop, concurrency=1, poll_interval=settings.worker_poll_interval),
             run_scheduler(sessionmaker, stop, day_start_hour=settings.work_day_start_hour),
         )
     finally:
