@@ -34,6 +34,8 @@ class Settings(BaseSettings):
 
     # --- LLM (любой OpenAI-совместимый API) ---
     llm_base_url: str | None = None
+    # Заголовок OpenAI-Project; для YandexGPT — ID каталога Yandex Cloud
+    llm_project: str | None = None
     llm_api_key: SecretStr = SecretStr("")
     llm_model: str
     # Мультимодальная модель для описания фото; пусто — фото идут в отчёт только с подписью
@@ -51,7 +53,7 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _empty_to_none(self) -> "Settings":
-        for name in ("whisper_api_base_url", "llm_base_url", "llm_vision_model"):
+        for name in ("whisper_api_base_url", "llm_base_url", "llm_project", "llm_vision_model"):
             if getattr(self, name) == "":
                 setattr(self, name, None)
         return self

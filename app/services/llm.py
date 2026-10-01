@@ -46,6 +46,7 @@ class LLMClient:
         client = AsyncOpenAI(
             api_key=settings.llm_api_key.get_secret_value() or "not-needed",
             base_url=settings.llm_base_url,
+            project=settings.llm_project,
             timeout=settings.llm_timeout,
             max_retries=2,
         )
