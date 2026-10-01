@@ -22,6 +22,13 @@ class Settings(BaseSettings):
     work_day_start_hour: int = Field(default=0, ge=0, le=23)
     log_level: str = "INFO"
 
+    # --- Персональные данные (152-ФЗ) ---
+    # Оператор ПДн для текста согласия, например «ООО Ромашка, ИНН 7700000000, г. Москва, ...»
+    pd_operator: str | None = None
+    privacy_policy_url: str | None = None
+    # Куда писать для отзыва согласия и удаления данных: e-mail или @username
+    support_contact: str | None = None
+
     # --- Расшифровка голосовых ---
     transcriber: TranscriberBackend = TranscriberBackend.API
     whisper_api_base_url: str | None = None
@@ -54,7 +61,15 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _empty_to_none(self) -> "Settings":
-        for name in ("whisper_api_base_url", "llm_base_url", "llm_project", "llm_vision_model"):
+        for name in (
+            "whisper_api_base_url",
+            "llm_base_url",
+            "llm_project",
+            "llm_vision_model",
+            "pd_operator",
+            "privacy_policy_url",
+            "support_contact",
+        ):
             if getattr(self, name) == "":
                 setattr(self, name, None)
         return self

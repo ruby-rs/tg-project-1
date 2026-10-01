@@ -94,6 +94,8 @@ class User(Base):
     username: Mapped[str | None] = mapped_column(String(64))
     # Объект, к которому сейчас привязываются входящие сообщения прораба
     current_site_id: Mapped[int | None] = mapped_column(ForeignKey("sites.id", ondelete="SET NULL"))
+    # Согласие на обработку персональных данных (152-ФЗ); None — не дано или отозвано
+    consent_at: Mapped[datetime | None]
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
     company: Mapped[Company | None] = relationship(lazy="joined")

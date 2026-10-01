@@ -16,6 +16,7 @@ from aiogram import Bot
 from aiogram.client.session.base import BaseSession
 from aiogram.methods import (
     AnswerCallbackQuery,
+    EditMessageReplyMarkup,
     EditMessageText,
     GetFile,
     GetMe,
@@ -72,7 +73,7 @@ class MockedSession(BaseSession):
             )
         if isinstance(method, SetMessageReaction | SendChatAction | AnswerCallbackQuery):
             return True
-        if isinstance(method, EditMessageText):
+        if isinstance(method, EditMessageText | EditMessageReplyMarkup):
             return True
         raise NotImplementedError(type(method).__name__)
 
@@ -172,6 +173,7 @@ async def test_full_flow(sessionmaker, settings, bot, tg, tmp_path):
 
     # 1. Регистрация руководителя и компании
     await dp.feed_update(bot, make_update(text="/start"))
+    await dp.feed_update(bot, callback_update("consent:accept"))
     await dp.feed_update(bot, make_update(text="ООО Стройка"))
     # 2. Сообщение до выбора объекта сохраняется «без объекта»
     await dp.feed_update(bot, make_update(text="Привезли арматуру"))
@@ -261,6 +263,7 @@ async def test_full_flow(sessionmaker, settings, bot, tg, tmp_path):
 async def test_duplicate_update_is_ignored(sessionmaker, settings, bot):
     dp = build_dispatcher(settings, sessionmaker)
     await dp.feed_update(bot, make_update(text="/start"))
+    await dp.feed_update(bot, callback_update("consent:accept"))
     await dp.feed_update(bot, make_update(text="ООО Стройка"))
     update = make_update(text="Сообщение")
     await dp.feed_update(bot, update)
@@ -286,6 +289,7 @@ async def test_foreman_sees_only_own_sites(sessionmaker, settings, bot, tg):
 
     # Приглашение в компанию без объекта: объектов прораб пока не видит
     await dp.feed_update(bot, make_update(text="/start inv_CODE123"))
+    await dp.feed_update(bot, callback_update("consent:accept"))
     assert "Вы подключены к компании «ООО Стройка»" in tg.sent_texts()[-1]
     assert "Вас пока не добавили ни на один объект" in tg.sent_texts()[-1]
 
@@ -403,6 +407,7 @@ def edited_update(message_id: int, **message_fields: Any) -> Update:
 
 async def register_owner_with_site(dp, bot, site_name: str = "ЖК Северный") -> None:
     await dp.feed_update(bot, make_update(text="/start"))
+    await dp.feed_update(bot, callback_update("consent:accept"))
     await dp.feed_update(bot, make_update(text="ООО Стройка"))
     await dp.feed_update(bot, make_update(text="/new_object"))
     await dp.feed_update(bot, make_update(text=site_name))
@@ -492,3 +497,42 @@ async def test_report_failure_is_reported_after_attempts(sessionmaker, settings,
         job = await s.get(ReportJob, job_id)
     assert job.status == EntryStatus.FAILED
     assert "Не удалось сформировать отчёт" in tg.sent_texts()[-1]
+
+
+async def test_nothing_works_without_consent(sessionmaker, settings, bot, tg):
+    settings.pd_operator = "ООО Ромашка, ИНН 7700000000"
+    dp = build_dispatcher(settings, sessionmaker)
+
+    await dp.feed_update(bot, make_update(text="/start"))
+    assert "Согласие на обработку персональных данных" in tg.sent_texts()[-1]
+    assert "Оператор: ООО Ромашка" in tg.sent_texts()[-1]
+
+    # Без согласия сообщение не сохраняется
+    await dp.feed_update(bot, make_update(text="ООО Стройка"))
+    assert "После согласия пришлите сообщение ещё раз" in tg.sent_texts()[-1]
+
+    await dp.feed_update(bot, callback_update("consent:accept"))
+    assert "напишите название компании" in tg.sent_texts()[-1]
+    async with sessionmaker() as s:
+        user = await s.scalar(select(User))
+        assert user.consent_at is not None
+        assert await s.scalar(select(Entry)) is None
+
+    # Отзыв согласия снова блокирует бота
+    await dp.feed_update(bot, callback_update("consent:revoke"))
+    await dp.feed_update(bot, make_update(text="/report"))
+    assert "Согласие на обработку персональных данных" in tg.sent_texts()[-1]
+
+
+async def test_invite_link_survives_consent(sessionmaker, settings, bot, tg):
+    async with sessionmaker() as s:
+        company = Company(name="ООО Стройка", invite_code="CODE123")
+        s.add(company)
+        await s.flush()
+        s.add(Site(company_id=company.id, name="Склад", invite_code="SKLAD"))
+        await s.commit()
+
+    dp = build_dispatcher(settings, sessionmaker)
+    await dp.feed_update(bot, make_update(text="/start site_SKLAD"))
+    await dp.feed_update(bot, callback_update("consent:accept"))
+    assert "Текущий объект: <b>Склад</b>" in tg.sent_texts()[-1]
