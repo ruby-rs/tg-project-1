@@ -1,5 +1,6 @@
 import io
 from datetime import UTC, date, datetime
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
@@ -158,3 +159,35 @@ def test_sentry_is_off_without_dsn(settings, monkeypatch):
     setup_sentry(settings, "worker")
     assert called[0]["send_default_pii"] is False
     assert called[0]["server_name"] == "worker"
+
+
+class FakeWhisperModel:
+    def transcribe(self, path, **kw):
+        assert kw["beam_size"] == 1
+        segment = SimpleNamespace(text=" Залили бетон ")
+        return [segment], None
+
+
+async def test_local_whisper_loads_lazily_and_unloads_when_idle(tmp_path):
+    import asyncio
+
+    from app.services.transcription import LocalWhisperTranscriber
+
+    loads = []
+
+    def factory():
+        loads.append(1)
+        return FakeWhisperModel()
+
+    whisper = LocalWhisperTranscriber(
+        "small", "cpu", "int8", "ru", beam_size=1, unload_after=0.05, model_factory=factory
+    )
+    assert not whisper.loaded  # при старте воркера память не занята
+    assert await whisper.transcribe(tmp_path / "a.ogg") == "Залили бетон"
+    assert await whisper.transcribe(tmp_path / "b.ogg") == "Залили бетон"
+    assert loads == [1] and whisper.loaded  # подряд — без повторной загрузки
+
+    await asyncio.sleep(0.15)
+    assert not whisper.loaded  # простой — модель выгружена
+    await whisper.transcribe(tmp_path / "c.ogg")
+    assert loads == [1, 1]
