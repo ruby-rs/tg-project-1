@@ -32,7 +32,8 @@ class ReportQueue:
         report_service: ReportService,
         *,
         max_attempts: int = 3,
-        stale_after: int = 1800,
+        # Запрос к медленной локальной LLM с повтором может идти ~30 минут
+        stale_after: int = 3600,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._bot = bot
