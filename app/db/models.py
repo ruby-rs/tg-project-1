@@ -1,5 +1,5 @@
 import secrets
-from datetime import date, datetime
+from datetime import date, datetime, time
 from enum import StrEnum
 from typing import Any
 
@@ -14,6 +14,7 @@ from sqlalchemy import (
     MetaData,
     String,
     Text,
+    Time,
     UniqueConstraint,
     func,
     text,
@@ -30,6 +31,9 @@ NAMING_CONVENTION = {
 }
 
 
+DEFAULT_WORK_DAYS = "123456"
+
+
 def new_invite_code() -> str:
     return secrets.token_urlsafe(9)
 
@@ -39,6 +43,7 @@ class Base(DeclarativeBase):
     type_annotation_map = {
         datetime: DateTime(timezone=True),
         date: Date,
+        time: Time,
         dict[str, Any]: JSONB,
     }
 
@@ -78,6 +83,17 @@ class Company(Base):
     name: Mapped[str] = mapped_column(String(255))
     timezone: Mapped[str] = mapped_column(String(64), default="Europe/Moscow")
     invite_code: Mapped[str] = mapped_column(String(32), unique=True)
+    # Вечерняя сводка руководителям и напоминание прорабам (местное время; None — выкл.)
+    digest_time: Mapped[time | None] = mapped_column(
+        default=time(19, 0), server_default=text("'19:00'")
+    )
+    reminder_time: Mapped[time | None] = mapped_column(
+        default=time(17, 0), server_default=text("'17:00'")
+    )
+    # Рабочие дни — номера дней недели ISO (1 — пн … 7 — вс)
+    work_days: Mapped[str] = mapped_column(
+        String(7), default=DEFAULT_WORK_DAYS, server_default=DEFAULT_WORK_DAYS
+    )
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
     sites: Mapped[list["Site"]] = relationship(back_populates="company")
@@ -151,6 +167,9 @@ class Entry(Base):
         Index("ix_entries_site_date", "site_id", "work_date"),
         Index("ix_entries_queue", "status", "next_attempt_at"),
         Index("ix_entries_transcript_message", "tg_chat_id", "transcript_message_id"),
+        # Напоминания и активность прорабов, статистика компании
+        Index("ix_entries_user_date", "user_id", "work_date"),
+        Index("ix_entries_company_date", "company_id", "work_date"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -230,6 +249,78 @@ class ReportJob(Base):
     finished_at: Mapped[datetime | None]
 
     site: Mapped[Site] = relationship()
+
+
+class ExportJob(Base):
+    """Выгрузка архива объекта за период: ZIP с файлами, реестром и контрольными суммами."""
+
+    __tablename__ = "export_jobs"
+    __table_args__ = (Index("ix_export_jobs_queue", "status", "next_attempt_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    site_id: Mapped[int] = mapped_column(ForeignKey("sites.id", ondelete="CASCADE"))
+    date_from: Mapped[date]
+    date_to: Mapped[date]
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    status: Mapped[str] = mapped_column(String(16), default=EntryStatus.PENDING)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime | None]
+    locked_at: Mapped[datetime | None]
+    error: Mapped[str | None] = mapped_column(Text)
+    files_count: Mapped[int | None] = mapped_column(Integer)
+    total_size: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    finished_at: Mapped[datetime | None]
+
+    site: Mapped[Site] = relationship()
+
+
+class ReportFeedback(Base):
+    """Оценка отчёта пользователем — основная метрика качества на пилоте."""
+
+    __tablename__ = "report_feedback"
+    __table_args__ = (
+        UniqueConstraint("site_id", "work_date", "user_id", name="uq_report_feedback_user"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    site_id: Mapped[int] = mapped_column(ForeignKey("sites.id", ondelete="CASCADE"))
+    work_date: Mapped[date]
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    rating: Mapped[int] = mapped_column(Integer)  # 1 — полезно, -1 — есть ошибки
+    comment: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
+
+
+class ScheduledKind(StrEnum):
+    DIGEST = "digest"  # вечерняя сводка руководителям
+    REMINDER = "reminder"  # напоминание прорабам без сообщений за день
+
+
+class ScheduledRun(Base):
+    """Плановая рассылка компании за рабочий день. Уникальность защищает от повторов."""
+
+    __tablename__ = "scheduled_runs"
+    __table_args__ = (
+        UniqueConstraint("company_id", "kind", "work_date", name="uq_scheduled_runs_day"),
+        Index("ix_scheduled_runs_queue", "status", "next_attempt_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"))
+    kind: Mapped[str] = mapped_column(String(16))
+    work_date: Mapped[date]
+    status: Mapped[str] = mapped_column(String(16), default=EntryStatus.PENDING)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime | None]
+    locked_at: Mapped[datetime | None]
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    finished_at: Mapped[datetime | None]
+
+    company: Mapped[Company] = relationship()
 
 
 class DailyReport(Base):

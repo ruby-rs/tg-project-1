@@ -7,3 +7,17 @@ class Registration(StatesGroup):
 
 class SiteCreation(StatesGroup):
     name = State()
+
+
+class SiteEdit(StatesGroup):
+    name = State()
+    address = State()
+
+
+class CompanySettings(StatesGroup):
+    digest_time = State()
+    reminder_time = State()
+
+
+class FeedbackComment(StatesGroup):
+    text = State()

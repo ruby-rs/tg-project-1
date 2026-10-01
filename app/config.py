@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     whisper_device: str = "cpu"
     whisper_compute_type: str = "int8"
     whisper_language: str = "ru"
+    # 5 — точнее, 1 — примерно вдвое быстрее на слабом процессоре
+    whisper_beam_size: int = Field(default=5, ge=1, le=10)
+    # Выгрузить модель из памяти после стольких секунд без голосовых (0 — не выгружать)
+    whisper_unload_after: int = Field(default=600, ge=0)
 
     # --- LLM (любой OpenAI-совместимый API) ---
     llm_base_url: str | None = None

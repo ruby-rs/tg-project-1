@@ -7,6 +7,7 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.utils.deep_linking import create_start_link
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot.commands import sync_user_commands
 from app.bot.filters import IsManager
 from app.bot.handlers.sites import set_current_site
 from app.bot.keyboards import InviteLink, invite_keyboard, sites_keyboard
@@ -36,7 +37,12 @@ HELP_TEXT = """\
 /object — выбрать объект
 /new_object — добавить объект
 /report — отчёт за день
+/archive — выгрузить архив фото и сообщений объекта
 /invite — пригласить прораба на объект (для руководителя)
+/sites — управление объектами (для руководителя)
+/team — команда и роли (для руководителя)
+/settings — время сводки и напоминаний, часовой пояс (для руководителя)
+/stats — статистика за неделю (для руководителя)
 /privacy — персональные данные и отзыв согласия
 /cancel — отменить текущее действие"""
 
@@ -130,6 +136,7 @@ async def process_start(
 @router.message(Registration.company_name, F.text & ~F.text.startswith("/"))
 async def register_company(
     message: Message,
+    bot: Bot,
     user: User,
     session: AsyncSession,
     state: FSMContext,
@@ -141,6 +148,7 @@ async def register_company(
         return
     company = await CompanyRepo(session).create(name, settings.default_timezone, user)
     await state.clear()
+    await sync_user_commands(bot, user)
     await message.answer(
         f"🏗 Компания «{escape(company.name)}» создана, вы — руководитель.\n\n"
         "Дальше:\n"

@@ -13,6 +13,7 @@ from app.services.storage import LocalFileStorage
 from app.timeutils import work_date_for
 from app.worker.processor import file_extension
 from app.worker.runner import retry_delay
+from tests.helpers import fake_openai
 
 
 def test_work_date_uses_company_timezone():
@@ -89,21 +90,6 @@ def test_retry_delay_grows_and_is_capped():
     assert retry_delay(10).total_seconds() == 900
 
 
-class FakeCompletions:
-    def __init__(self, answers: list[str]) -> None:
-        self.answers = answers
-        self.calls: list[dict] = []
-
-    async def create(self, **kwargs):
-        self.calls.append(kwargs)
-        content = self.answers.pop(0)
-        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
-
-
-def fake_openai(answers: list[str]) -> SimpleNamespace:
-    return SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions(answers)))
-
-
 async def test_llm_repairs_invalid_json():
     client = fake_openai(['{"work_done": []}', '{"summary": "ok"}'])
     llm = LLMClient(client, model="m")
@@ -173,3 +159,35 @@ def test_sentry_is_off_without_dsn(settings, monkeypatch):
     setup_sentry(settings, "worker")
     assert called[0]["send_default_pii"] is False
     assert called[0]["server_name"] == "worker"
+
+
+class FakeWhisperModel:
+    def transcribe(self, path, **kw):
+        assert kw["beam_size"] == 1
+        segment = SimpleNamespace(text=" Залили бетон ")
+        return [segment], None
+
+
+async def test_local_whisper_loads_lazily_and_unloads_when_idle(tmp_path):
+    import asyncio
+
+    from app.services.transcription import LocalWhisperTranscriber
+
+    loads = []
+
+    def factory():
+        loads.append(1)
+        return FakeWhisperModel()
+
+    whisper = LocalWhisperTranscriber(
+        "small", "cpu", "int8", "ru", beam_size=1, unload_after=0.05, model_factory=factory
+    )
+    assert not whisper.loaded  # при старте воркера память не занята
+    assert await whisper.transcribe(tmp_path / "a.ogg") == "Залили бетон"
+    assert await whisper.transcribe(tmp_path / "b.ogg") == "Залили бетон"
+    assert loads == [1] and whisper.loaded  # подряд — без повторной загрузки
+
+    await asyncio.sleep(0.15)
+    assert not whisper.loaded  # простой — модель выгружена
+    await whisper.transcribe(tmp_path / "c.ogg")
+    assert loads == [1, 1]

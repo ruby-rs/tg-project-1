@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from datetime import date
 
 from aiogram.filters.callback_data import CallbackData
 from aiogram.types import InlineKeyboardMarkup
@@ -48,4 +49,37 @@ def report_sites_keyboard(sites: Sequence[Site], days_ago: int) -> InlineKeyboar
     for site in sites:
         kb.button(text=site.name, callback_data=ReportSite(site_id=site.id, days_ago=days_ago))
     kb.adjust(1)
+    return kb.as_markup()
+
+
+class ReportView(CallbackData, prefix="rv"):
+    """Показать сохранённый отчёт объекта за день (кнопки под вечерней сводкой)."""
+
+    site_id: int
+    day: int  # date.toordinal()
+
+
+def digest_keyboard(sites: Sequence[tuple[int, str]], work_date: date) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for site_id, name in sites:
+        kb.button(
+            text=f"📋 {name}",
+            callback_data=ReportView(site_id=site_id, day=work_date.toordinal()),
+        )
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+class Feedback(CallbackData, prefix="fb"):
+    site_id: int
+    day: int  # date.toordinal()
+    rating: int  # 1 | -1
+
+
+def feedback_keyboard(site_id: int, work_date: date) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    day = work_date.toordinal()
+    kb.button(text="👍 Полезно", callback_data=Feedback(site_id=site_id, day=day, rating=1))
+    kb.button(text="👎 Есть ошибки", callback_data=Feedback(site_id=site_id, day=day, rating=-1))
+    kb.adjust(2)
     return kb.as_markup()

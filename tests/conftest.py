@@ -2,6 +2,7 @@ import os
 from collections.abc import AsyncIterator
 
 import pytest
+from aiogram import Bot
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -9,6 +10,7 @@ from app.bot.handlers import get_routers
 from app.config import Settings
 from app.db.models import Base
 from app.db.session import create_engine, create_sessionmaker
+from tests.helpers import MockedSession
 
 TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL")
 
@@ -48,3 +50,13 @@ def _detach_routers():
     yield
     for router in get_routers():
         router._parent_router = None
+
+
+@pytest.fixture
+def tg() -> MockedSession:
+    return MockedSession(files={"voice-file": b"OggS-fake-voice", "photo-file": b"jpeg-bytes"})
+
+
+@pytest.fixture
+def bot(tg: MockedSession) -> Bot:
+    return Bot("123456:TEST", session=tg)

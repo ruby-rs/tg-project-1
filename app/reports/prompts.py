@@ -1,6 +1,8 @@
 import json
 from collections.abc import Sequence
 from datetime import date
+from functools import cache
+from typing import Any
 
 from app.db.models import Entry, EntryKind, Site
 from app.reports.schema import SiteDailyReport
@@ -37,9 +39,33 @@ PHOTO_SYSTEM_PROMPT = """\
 что действительно видно. Если фото не относится к стройке — так и напиши."""
 
 
+def compact_schema(node: Any) -> Any:
+    """Сжимает JSON Schema для промпта на треть: без title, «X или null» — одним типом.
+
+    Промпт уходит в LLM с каждым отчётом; на локальной модели время его обработки —
+    заметная часть времени сборки отчёта.
+    """
+    if isinstance(node, list):
+        return [compact_schema(x) for x in node]
+    if not isinstance(node, dict):
+        return node
+    node = {k: compact_schema(v) for k, v in node.items() if k != "title"}
+    any_of = node.get("anyOf")
+    if isinstance(any_of, list) and len(any_of) == 2 and {"type": "null"} in any_of:
+        other = next(x for x in any_of if x != {"type": "null"})
+        rest = {k: v for k, v in node.items() if k not in ("anyOf", "default")}
+        node = {**other, **rest}
+        if "type" in other:
+            node["type"] = [other["type"], "null"]
+    if node.get("default") in (None, []) and "default" in node:
+        node.pop("default")
+    return node
+
+
+@cache
 def report_system_prompt() -> str:
-    schema = json.dumps(SiteDailyReport.model_json_schema(), ensure_ascii=False)
-    return REPORT_SYSTEM_PROMPT + schema
+    schema = compact_schema(SiteDailyReport.model_json_schema())
+    return REPORT_SYSTEM_PROMPT + json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
 
 
 _KIND_LABELS = {
