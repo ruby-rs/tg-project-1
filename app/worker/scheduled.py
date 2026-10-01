@@ -193,8 +193,8 @@ class ScheduledQueue:
                     SiteDigest(site.id, site.name, sum(result.kinds.values()), result.report)
                 )
 
-        local = datetime.now(UTC).astimezone(ZoneInfo(company.timezone))
-        workday = str(local.isoweekday()) in company.work_days
+        # День недели — по дате сводки: она может уйти после полуночи (догоняние)
+        workday = str(run.work_date.isoweekday()) in company.work_days
         if digest.is_empty and not workday:
             return True  # выходной, никто не работал — не беспокоим
 

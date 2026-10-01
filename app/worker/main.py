@@ -69,9 +69,10 @@ async def run_worker(settings: Settings) -> None:
                 poll_interval=settings.worker_poll_interval,
             ),
             # Вечерние сводки и напоминания: по одной рассылке за раз
-            run_queue(scheduled, stop, concurrency=1, poll_interval=settings.worker_poll_interval),
+            # Редкие очереди опрашиваем реже, чтобы не нагружать БД впустую
+            run_queue(scheduled, stop, concurrency=1, poll_interval=10),
             # Выгрузка архива нагружает диск — по одной за раз
-            run_queue(exports, stop, concurrency=1, poll_interval=settings.worker_poll_interval),
+            run_queue(exports, stop, concurrency=1, poll_interval=5),
             run_scheduler(sessionmaker, stop, day_start_hour=settings.work_day_start_hour),
         )
     finally:

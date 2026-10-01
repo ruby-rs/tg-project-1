@@ -116,6 +116,11 @@ async def test_archive_flow(sessionmaker, settings, bot, tg, tmp_path):
         bot, callback_update(ArchivePeriod(site_id=site.id, period="today").pack())
     )
     assert "⏳ Собираю архив «Склад»" in tg.sent_texts()[-1]
+    # Повторное нажатие не ставит вторую тяжёлую выгрузку
+    await dp.feed_update(
+        bot, callback_update(ArchivePeriod(site_id=site.id, period="today").pack())
+    )
+    assert "уже собирается" in tg.sent_texts()[-1]
 
     exports = ExportQueue(sessionmaker, bot, storage)
     [job_id] = await exports.claim(10)

@@ -31,9 +31,14 @@ class UserRepo:
     async def get_or_create(self, tg_id: int, full_name: str, username: str | None) -> User:
         user = await self.session.scalar(select(User).where(User.tg_id == tg_id))
         if user is None:
-            user = User(tg_id=tg_id, full_name=full_name, username=username)
-            self.session.add(user)
-            await self.session.flush()
+            # Апдейты обрабатываются параллельно: альбом от нового пользователя — это
+            # несколько одновременных вставок, поэтому ON CONFLICT, а не add()
+            await self.session.execute(
+                pg_insert(User)
+                .values(tg_id=tg_id, full_name=full_name, username=username, role=UserRole.FOREMAN)
+                .on_conflict_do_nothing(index_elements=["tg_id"])
+            )
+            user = await self.session.scalar(select(User).where(User.tg_id == tg_id))
         elif user.full_name != full_name or user.username != username:
             user.full_name = full_name
             user.username = username
@@ -368,7 +373,17 @@ class ExportJobRepo:
 
     async def enqueue(
         self, site_id: int, date_from: date, date_to: date, chat_id: int, user_id: int
-    ) -> None:
+    ) -> bool:
+        """Ставит выгрузку в очередь. False — по этому объекту для чата уже идёт выгрузка."""
+        busy = await self.session.scalar(
+            select(ExportJob.id).where(
+                ExportJob.site_id == site_id,
+                ExportJob.chat_id == chat_id,
+                ExportJob.status.in_([EntryStatus.PENDING, EntryStatus.PROCESSING]),
+            )
+        )
+        if busy is not None:
+            return False
         self.session.add(
             ExportJob(
                 site_id=site_id,
@@ -379,6 +394,7 @@ class ExportJobRepo:
             )
         )
         await self.session.flush()
+        return True
 
     async def claim_batch(self, limit: int, stale_after: int) -> list[int]:
         return await claim_jobs(self.session, ExportJob, limit, stale_after)

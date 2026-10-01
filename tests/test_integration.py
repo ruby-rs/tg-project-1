@@ -415,3 +415,17 @@ async def test_repeated_report_reuses_saved_one(sessionmaker, settings, bot, tg)
     await dp.feed_update(bot, make_update(text="Привезли арматуру"))
     await report()
     assert len(llm_client.chat.completions.calls) == 2
+
+
+async def test_new_user_created_once_under_concurrency(sessionmaker):
+    """Альбом от нового пользователя — параллельные апдейты не должны падать на вставке."""
+    from app.db.repositories import UserRepo
+
+    async def get_or_create() -> int:
+        async with sessionmaker() as s:
+            user = await UserRepo(s).get_or_create(4242, "Новый Прораб", None)
+            await s.commit()
+            return user.id
+
+    ids = await asyncio.gather(*(get_or_create() for _ in range(5)))
+    assert len(set(ids)) == 1

@@ -109,8 +109,13 @@ async def on_archive_period(
     today = today_for(tz, settings.work_day_start_hour)
     date_from, date_to = period_dates(callback_data.period, today, site, tz)
     chat_id = call.message.chat.id if call.message else call.from_user.id
-    await ExportJobRepo(session).enqueue(site.id, date_from, date_to, chat_id, user.id)
+    created = await ExportJobRepo(session).enqueue(site.id, date_from, date_to, chat_id, user.id)
     await call.answer()
+    if not created:
+        await bot.send_message(
+            chat_id, f"⏳ Архив «{escape(site.name)}» уже собирается — пришлю, как будет готов."
+        )
+        return
     period = (
         f"{date_from:%d.%m.%Y}"
         if date_from == date_to

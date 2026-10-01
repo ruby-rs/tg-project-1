@@ -167,6 +167,9 @@ class Entry(Base):
         Index("ix_entries_site_date", "site_id", "work_date"),
         Index("ix_entries_queue", "status", "next_attempt_at"),
         Index("ix_entries_transcript_message", "tg_chat_id", "transcript_message_id"),
+        # Напоминания и активность прорабов, статистика компании
+        Index("ix_entries_user_date", "user_id", "work_date"),
+        Index("ix_entries_company_date", "company_id", "work_date"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
