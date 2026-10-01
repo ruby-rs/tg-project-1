@@ -136,3 +136,18 @@ def test_album_is_one_line_with_shared_caption():
     )
     assert "#1, #2 [06:15] Иван Петров, альбом (2 шт.): подпись: «Перекрытие 3 этажа»" in prompt
     assert "на фото: #1 — Опалубка" in prompt
+
+
+def test_system_prompt_schema_is_compact():
+    import json
+
+    from app.reports.prompts import compact_schema, report_system_prompt
+
+    full = json.dumps(SiteDailyReport.model_json_schema(), ensure_ascii=False)
+    prompt = report_system_prompt()
+    assert '"title"' not in prompt and "anyOf" not in prompt
+    assert len(prompt) < 3 * len(full) // 4 + 1500
+    # Сжатие не теряет полей
+    compact = compact_schema(SiteDailyReport.model_json_schema())
+    assert set(compact["properties"]) == set(SiteDailyReport.model_fields)
+    assert compact["$defs"]["WorkItem"]["properties"]["quantity"]["type"] == ["number", "null"]

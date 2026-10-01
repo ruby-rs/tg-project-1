@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import DailyReport, Entry, Site
@@ -45,11 +46,12 @@ class ReportService:
         work_date: date,
         tz_name: str,
         *,
-        reuse: bool = False,
+        reuse: bool = True,
     ) -> ReportResult | None:
-        """Собирает отчёт по объекту за день и сохраняет его. None — сообщений нет.
+        """Отчёт по объекту за день. None — сообщений нет.
 
-        reuse=True — взять сохранённый отчёт, если он актуален (без запроса к LLM).
+        Если с момента прошлой сборки не было новых и исправленных сообщений, возвращает
+        сохранённый отчёт без запроса к LLM (reuse=False — собрать заново принудительно).
         """
         entries_repo = EntryRepo(session)
         entries = await entries_repo.for_report(site.id, work_date)
@@ -62,8 +64,15 @@ class ReportService:
         if reuse:
             saved = await reports.get(site.id, work_date)
             if is_fresh(saved, entries):
-                return ReportResult(SiteDailyReport.model_validate(saved.data), kinds, unprocessed)
+                try:
+                    report = SiteDailyReport.model_validate(saved.data)
+                    return ReportResult(report, kinds, unprocessed)
+                except ValidationError:
+                    log.warning("Сохранённый отчёт %s не прошёл проверку, пересобираю", saved.id)
 
+        # Не держим транзакцию открытой на время запроса к LLM (это могут быть минуты):
+        # данные для промпта уже прочитаны, ORM-объекты после commit остаются доступны
+        await session.commit()
         report = await self._llm.complete_json(
             report_system_prompt(),
             report_user_prompt(site, work_date, entries, tz_name),

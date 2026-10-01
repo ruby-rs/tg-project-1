@@ -73,8 +73,10 @@ class EntryProcessor:
             )
             if entry.kind == EntryKind.PHOTO:
                 entry.taken_at = extract_taken_at(data, tz)
-            # Контрольная точка: файл в архиве, даже если дальше упадёт расшифровка
-            await session.commit()
+
+        # Контрольная точка: файл в архиве, даже если дальше упадёт расшифровка.
+        # Заодно закрываем транзакцию — не держим её открытой, пока идёт Whisper
+        await session.commit()
 
         if entry.kind in AUDIO_KINDS and entry.transcript is None and entry.file_path:
             entry.transcript = await self.transcriber.transcribe(self.storage.path(entry.file_path))

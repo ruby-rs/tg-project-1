@@ -178,9 +178,8 @@ class ScheduledQueue:
         digest = Digest(company_name=company.name, work_date=run.work_date)
         for site in sites:
             try:
-                result = await self._reports.build(
-                    session, site, run.work_date, company.timezone, reuse=True
-                )
+                # Актуальные отчёты берутся из БД, LLM — только для изменившихся объектов
+                result = await self._reports.build(session, site, run.work_date, company.timezone)
                 await session.commit()
             except Exception:
                 # LLM падает до записи в БД, откатывать нечего; сводка уйдёт с пометкой

@@ -390,3 +390,28 @@ async def test_invite_link_survives_consent(sessionmaker, settings, bot, tg):
     await dp.feed_update(bot, make_update(text="/start site_SKLAD"))
     await dp.feed_update(bot, callback_update("consent:accept"))
     assert "Текущий объект: <b>Склад</b>" in tg.sent_texts()[-1]
+
+
+async def test_repeated_report_reuses_saved_one(sessionmaker, settings, bot, tg):
+    """Повторный /report без новых сообщений не тратит запрос к LLM."""
+    dp = build_dispatcher(settings, sessionmaker)
+    await register_owner_with_site(dp, bot)
+    await dp.feed_update(bot, make_update(text="Залили 12 кубов"))
+
+    llm_client = fake_openai([REPORT_JSON, REPORT_JSON])
+    reports = ReportQueue(sessionmaker, bot, ReportService(LLMClient(llm_client, "m")))
+
+    async def report() -> str:
+        await dp.feed_update(bot, make_update(text="/report"))
+        [job_id] = await reports.claim(10)
+        await reports.handle(job_id)
+        return tg.sent_texts()[-1]
+
+    first = await report()
+    assert await report() == first
+    assert len(llm_client.chat.completions.calls) == 1
+
+    # Новое сообщение — отчёт пересобирается
+    await dp.feed_update(bot, make_update(text="Привезли арматуру"))
+    await report()
+    assert len(llm_client.chat.completions.calls) == 2
