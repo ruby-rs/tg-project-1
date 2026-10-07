@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from collections import Counter
 from collections.abc import Sequence
@@ -7,12 +8,14 @@ from datetime import date
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import DailyReport, Entry, Site
+from app.db.models import DailyReport, Entry, EntryKind, Site
 from app.db.repositories import EntryRepo, FeedbackRepo, ReportRepo
 from app.reports.prompts import report_system_prompt, report_user_prompt
 from app.reports.render import render_report
 from app.reports.schema import SiteDailyReport
 from app.services.llm import LLMClient
+from app.services.photos import PhotoDescriber
+from app.services.storage import LocalFileStorage
 
 log = logging.getLogger(__name__)
 
@@ -36,8 +39,34 @@ def is_fresh(saved: DailyReport | None, entries: Sequence[Entry]) -> bool:
 
 
 class ReportService:
-    def __init__(self, llm: LLMClient) -> None:
+    def __init__(
+        self,
+        llm: LLMClient,
+        describer: PhotoDescriber | None = None,
+        storage: LocalFileStorage | None = None,
+    ) -> None:
         self._llm = llm
+        self._describer = describer
+        self._storage = storage
+
+    async def _describe_missing_photos(self, entries: Sequence[Entry]) -> int:
+        """Описывает фото, которые остались без описания при приёме: модель для фото
+        тогда не была задана или не ответила (например, упёрлась в лимит).
+        Возвращает, сколько фото удалось описать."""
+        if self._describer is None or self._storage is None:
+            return 0
+        described = 0
+        for entry in entries:
+            if entry.kind != EntryKind.PHOTO or entry.photo_description or not entry.file_path:
+                continue
+            try:
+                data = await asyncio.to_thread(self._storage.path(entry.file_path).read_bytes)
+                entry.photo_description = await self._describer.describe(data, entry.text)
+            except Exception:
+                log.warning("Не удалось описать фото entry=%s перед отчётом", entry.id)
+                continue
+            described += 1
+        return described
 
     async def build(
         self,
@@ -59,6 +88,9 @@ class ReportService:
         if not entries:
             return None
         kinds = Counter(e.kind for e in entries)
+        # Новые описания фото меняют отчёт — сохранённый тогда не подходит
+        if await self._describe_missing_photos(entries):
+            reuse = False
 
         reports = ReportRepo(session)
         if reuse:

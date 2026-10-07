@@ -438,3 +438,47 @@ async def test_new_user_created_once_under_concurrency(sessionmaker):
 
     ids = await asyncio.gather(*(get_or_create() for _ in range(5)))
     assert len(set(ids)) == 1
+
+
+class FakeDescriber:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def describe(self, data: bytes, caption: str | None) -> str:
+        self.calls += 1
+        return "Армирование плиты перекрытия"
+
+
+async def test_report_describes_photos_left_without_description(
+    sessionmaker, settings, bot, tg, tmp_path
+):
+    dp = build_dispatcher(settings, sessionmaker)
+    await register_owner_with_site(dp, bot)
+    photo = [{"file_id": "photo-file", "file_unique_id": "p1", "width": 10, "height": 10}]
+    await dp.feed_update(bot, make_update(photo=photo, caption="Плита"))
+
+    # При приёме модели для фото не было — фото сохранено без описания
+    storage = LocalFileStorage(tmp_path / "media")
+    worker = EntryQueue(sessionmaker, EntryProcessor(bot, storage, FakeTranscriber()))
+    for entry_id in await worker.claim(10):
+        await worker.handle(entry_id)
+
+    describer = FakeDescriber()
+    llm_client = fake_openai([REPORT_JSON])
+    service = ReportService(LLMClient(llm_client, "m"), describer, storage)
+    reports = ReportQueue(sessionmaker, bot, service)
+    await dp.feed_update(bot, make_update(text="/report"))
+    for job_id in await reports.claim(10):
+        await reports.handle(job_id)
+
+    user_prompt = llm_client.chat.completions.calls[0]["messages"][1]["content"]
+    assert "на фото: Армирование плиты перекрытия" in user_prompt
+    async with sessionmaker() as s:
+        entry = await s.scalar(select(Entry))
+    assert entry.photo_description == "Армирование плиты перекрытия"
+
+    # Описание сохранено: повторный отчёт не описывает фото заново
+    await dp.feed_update(bot, make_update(text="/report"))
+    for job_id in await reports.claim(10):
+        await reports.handle(job_id)
+    assert describer.calls == 1

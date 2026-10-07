@@ -31,11 +31,12 @@ async def run_worker(settings: Settings) -> None:
     )
     llm = LLMClient.from_settings(settings)
     storage = LocalFileStorage(settings.media_root)
+    describer = PhotoDescriber(llm) if settings.llm_vision_model else None
     processor = EntryProcessor(
         bot=bot,
         storage=storage,
         transcriber=build_transcriber(settings),
-        describer=PhotoDescriber(llm) if settings.llm_vision_model else None,
+        describer=describer,
     )
     entries = EntryQueue(
         sessionmaker,
@@ -43,7 +44,7 @@ async def run_worker(settings: Settings) -> None:
         max_attempts=settings.worker_max_attempts,
         stale_after=settings.worker_stale_after,
     )
-    report_service = ReportService(llm)
+    report_service = ReportService(llm, describer, storage)
     reports = ReportQueue(sessionmaker, bot, report_service)
     scheduled = ScheduledQueue(sessionmaker, bot, report_service)
     exports = ExportQueue(sessionmaker, bot, storage)
