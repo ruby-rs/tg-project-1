@@ -76,7 +76,7 @@ class ReportQueue:
             await self._typing(job.chat_id)
             try:
                 result = await self._reports.build(
-                    session, site, job.work_date, site.company.timezone
+                    session, site, job.work_date, site.company.timezone, reuse=not job.rebuild
                 )
                 job.status = EntryStatus.DONE
                 job.error = None

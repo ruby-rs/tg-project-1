@@ -343,8 +343,14 @@ class ReportJobRepo:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def enqueue(self, site_id: int, work_date: date, chat_id: int, user_id: int) -> bool:
-        """Ставит отчёт в очередь. False — такой отчёт уже формируется для этого чата."""
+    async def enqueue(
+        self, site_id: int, work_date: date, chat_id: int, user_id: int, *, rebuild: bool = False
+    ) -> bool:
+        """Ставит отчёт в очередь. False — такой отчёт уже формируется для этого чата.
+
+        rebuild=True — собрать заново, даже если сообщения не менялись.
+        """
+        active = ReportJob.status.in_([EntryStatus.PENDING, EntryStatus.PROCESSING])
         stmt = (
             pg_insert(ReportJob)
             .values(
@@ -353,15 +359,28 @@ class ReportJobRepo:
                 chat_id=chat_id,
                 user_id=user_id,
                 status=EntryStatus.PENDING,
+                rebuild=rebuild,
                 attempts=0,
             )
             .on_conflict_do_nothing(
-                index_elements=["site_id", "work_date", "chat_id"],
-                index_where=ReportJob.status.in_([EntryStatus.PENDING, EntryStatus.PROCESSING]),
+                index_elements=["site_id", "work_date", "chat_id"], index_where=active
             )
             .returning(ReportJob.id)
         )
-        return await self.session.scalar(stmt) is not None
+        created = await self.session.scalar(stmt) is not None
+        if not created and rebuild:
+            # Ожидающая задача пересоберёт отчёт с учётом нового замечания
+            await self.session.execute(
+                update(ReportJob)
+                .where(
+                    ReportJob.site_id == site_id,
+                    ReportJob.work_date == work_date,
+                    ReportJob.chat_id == chat_id,
+                    ReportJob.status == EntryStatus.PENDING,
+                )
+                .values(rebuild=True)
+            )
+        return created
 
     async def claim_batch(self, limit: int, stale_after: int) -> list[int]:
         return await claim_jobs(self.session, ReportJob, limit, stale_after)
@@ -481,6 +500,19 @@ class FeedbackRepo:
             )
             .values(comment=text[:2000], updated_at=func.now())
         )
+
+    async def comments(self, site_id: int, work_date: date) -> list[str]:
+        """Замечания к отчёту объекта за день — учитываются при следующей сборке."""
+        rows = await self.session.scalars(
+            select(ReportFeedback.comment)
+            .where(
+                ReportFeedback.site_id == site_id,
+                ReportFeedback.work_date == work_date,
+                ReportFeedback.comment.is_not(None),
+            )
+            .order_by(ReportFeedback.updated_at)
+        )
+        return [c for c in rows if c.strip()]
 
 
 @dataclass(slots=True)

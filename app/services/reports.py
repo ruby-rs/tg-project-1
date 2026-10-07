@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import DailyReport, Entry, Site
-from app.db.repositories import EntryRepo, ReportRepo
+from app.db.repositories import EntryRepo, FeedbackRepo, ReportRepo
 from app.reports.prompts import report_system_prompt, report_user_prompt
 from app.reports.render import render_report
 from app.reports.schema import SiteDailyReport
@@ -72,10 +72,11 @@ class ReportService:
 
         # Не держим транзакцию открытой на время запроса к LLM (это могут быть минуты):
         # данные для промпта уже прочитаны, ORM-объекты после commit остаются доступны
+        corrections = await FeedbackRepo(session).comments(site.id, work_date)
         await session.commit()
         report = await self._llm.complete_json(
             report_system_prompt(),
-            report_user_prompt(site, work_date, entries, tz_name),
+            report_user_prompt(site, work_date, entries, tz_name, corrections),
             SiteDailyReport,
         )
         report.drop_unknown_entry_ids({e.id for e in entries})

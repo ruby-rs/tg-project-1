@@ -34,12 +34,16 @@ def invite_keyboard(sites: Sequence[Site]) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def sites_keyboard(sites: Sequence[Site], current_id: int | None) -> InlineKeyboardMarkup:
+def sites_keyboard(
+    sites: Sequence[Site], current_id: int | None, *, can_create: bool = False
+) -> InlineKeyboardMarkup:
+    """Выбор объекта. Кнопка «Новый объект» — только руководителю (can_create)."""
     kb = InlineKeyboardBuilder()
     for site in sites:
         mark = "✅ " if site.id == current_id else ""
         kb.button(text=f"{mark}{site.name}", callback_data=SiteSelect(site_id=site.id))
-    kb.button(text="➕ Новый объект", callback_data=NewSite())
+    if can_create:
+        kb.button(text="➕ Новый объект", callback_data=NewSite())
     kb.adjust(1)
     return kb.as_markup()
 
@@ -76,10 +80,16 @@ class Feedback(CallbackData, prefix="fb"):
     rating: int  # 1 | -1
 
 
+class ReportRebuild(CallbackData, prefix="rb"):
+    site_id: int
+    day: int  # date.toordinal()
+
+
 def feedback_keyboard(site_id: int, work_date: date) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     day = work_date.toordinal()
     kb.button(text="👍 Полезно", callback_data=Feedback(site_id=site_id, day=day, rating=1))
     kb.button(text="👎 Есть ошибки", callback_data=Feedback(site_id=site_id, day=day, rating=-1))
-    kb.adjust(2)
+    kb.button(text="🔄 Пересобрать", callback_data=ReportRebuild(site_id=site_id, day=day))
+    kb.adjust(2, 1)
     return kb.as_markup()

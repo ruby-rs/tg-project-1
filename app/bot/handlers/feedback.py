@@ -3,7 +3,7 @@
 from datetime import date, timedelta
 from html import escape
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
@@ -12,6 +12,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.filters import HasCompany, IsManager
+from app.bot.handlers.reports import enqueue_report
 from app.bot.keyboards import Feedback
 from app.bot.states import FeedbackComment
 from app.config import Settings
@@ -73,15 +74,20 @@ async def on_feedback(
 
 @router.message(FeedbackComment.text, F.text & ~F.text.startswith("/"))
 async def on_feedback_comment(
-    message: Message, user: User, session: AsyncSession, state: FSMContext
+    message: Message, bot: Bot, user: User, session: AsyncSession, state: FSMContext
 ) -> None:
     data = await state.get_data()
     await state.clear()
+    site = None
     if "site_id" in data and "day" in data:
+        work_date = date.fromordinal(data["day"])
         await FeedbackRepo(session).comment(
-            data["site_id"], date.fromordinal(data["day"]), user.id, message.text.strip()
+            data["site_id"], work_date, user.id, message.text.strip()
         )
-    await message.answer("Спасибо, замечание записал.")
+        site = await SiteRepo(session).get_for_user(user, data["site_id"])
+    await message.answer("Спасибо, замечание записал и учту его в отчёте.")
+    if site is not None:
+        await enqueue_report(bot, message.chat.id, site, work_date, user, session, rebuild=True)
 
 
 # ---------- Статистика для руководителя ----------
