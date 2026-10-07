@@ -2,12 +2,12 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
-from app.bot.commands import MANAGER_COMMANDS
+from app.bot.commands import FOREMAN_COMMANDS, MANAGER_COMMANDS
 from app.db.models import User
 
 router = Router(name="fallback")
 
-MANAGER_ONLY = {c.command for c in MANAGER_COMMANDS} - {"help", "privacy"}
+MANAGER_ONLY = {c.command for c in MANAGER_COMMANDS} - {c.command for c in FOREMAN_COMMANDS}
 
 
 @router.message(F.text.startswith("/"))

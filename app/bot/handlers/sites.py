@@ -6,7 +6,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.filters import HasCompany
+from app.bot.filters import HasCompany, IsManager
 from app.bot.keyboards import NewSite, SiteSelect, sites_keyboard
 from app.bot.states import SiteCreation
 from app.db.models import Site, User
@@ -15,6 +15,15 @@ from app.db.repositories import EntryRepo, SiteRepo
 router = Router(name="sites")
 router.message.filter(HasCompany())
 router.callback_query.filter(HasCompany())
+
+NO_SITES_FOREMAN = (
+    "Вас пока не добавили ни на один объект. Попросите у руководителя ссылку на объект."
+)
+NO_SITES_MANAGER = "Объектов пока нет. Добавьте первый: /new_object"
+
+
+def no_sites_text(user: User) -> str:
+    return NO_SITES_MANAGER if user.is_manager else NO_SITES_FOREMAN
 
 
 async def set_current_site(session: AsyncSession, user: User, site: Site) -> str:
@@ -30,13 +39,11 @@ async def set_current_site(session: AsyncSession, user: User, site: Site) -> str
 async def cmd_object(message: Message, user: User, session: AsyncSession) -> None:
     sites = await SiteRepo(session).list_for_user(user)
     if not sites:
-        await message.answer(
-            "Объектов пока нет. Добавьте свой (/new_object) или попросите у руководителя "
-            "ссылку на объект."
-        )
+        await message.answer(no_sites_text(user))
         return
     await message.answer(
-        "Выберите объект:", reply_markup=sites_keyboard(sites, user.current_site_id)
+        "Выберите объект:",
+        reply_markup=sites_keyboard(sites, user.current_site_id, can_create=user.is_manager),
     )
 
 
@@ -54,13 +61,14 @@ async def on_site_selected(
         await call.message.edit_text(text)
 
 
-@router.message(Command("new_object"))
+# Объекты добавляет руководитель; прораб получает доступ по ссылке на объект
+@router.message(Command("new_object"), IsManager())
 async def cmd_new_object(message: Message, state: FSMContext) -> None:
     await state.set_state(SiteCreation.name)
     await message.answer("Как называется объект? Например: «ЖК Северный, корпус 2».")
 
 
-@router.callback_query(NewSite.filter())
+@router.callback_query(NewSite.filter(), IsManager())
 async def on_new_site(call: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(SiteCreation.name)
     await call.answer()
@@ -68,7 +76,13 @@ async def on_new_site(call: CallbackQuery, state: FSMContext) -> None:
         await call.message.answer("Как называется объект? Например: «ЖК Северный, корпус 2».")
 
 
-@router.message(SiteCreation.name, F.text & ~F.text.startswith("/"))
+@router.callback_query(NewSite.filter())
+async def on_new_site_denied(call: CallbackQuery) -> None:
+    """Кнопка из старого сообщения, нажатая прорабом."""
+    await call.answer("Добавить объект может только руководитель.", show_alert=True)
+
+
+@router.message(SiteCreation.name, F.text & ~F.text.startswith("/"), IsManager())
 async def on_site_name(
     message: Message, user: User, session: AsyncSession, state: FSMContext
 ) -> None:

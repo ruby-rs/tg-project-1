@@ -15,6 +15,7 @@ from aiogram.types import Message, ReactionTypeEmoji
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.filters import HasCompany
+from app.bot.handlers.sites import no_sites_text
 from app.bot.keyboards import sites_keyboard
 from app.config import Settings
 from app.db.models import AUDIO_KINDS, Entry, EntryKind, EntryStatus, User
@@ -87,12 +88,10 @@ async def _save_and_ack(message: Message, entry: Entry, user: User, session: Asy
         if sites:
             await message.reply(
                 "Сохранил. К какому объекту это относится?",
-                reply_markup=sites_keyboard(sites, None),
+                reply_markup=sites_keyboard(sites, None, can_create=user.is_manager),
             )
         else:
-            await message.reply(
-                "Сохранил. Добавьте объект, чтобы я привязал сообщения: /new_object"
-            )
+            await message.reply("Сохранил. " + no_sites_text(user))
         return
 
     await _react(message, "👀" if entry.kind in AUDIO_KINDS else "👍")

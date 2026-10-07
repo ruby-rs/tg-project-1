@@ -241,6 +241,8 @@ class ReportJob(Base):
     chat_id: Mapped[int] = mapped_column(BigInteger)
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     status: Mapped[str] = mapped_column(String(16), default=EntryStatus.PENDING)
+    # Собрать заново, даже если сообщения не менялись (после замечания или по кнопке)
+    rebuild: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     next_attempt_at: Mapped[datetime | None]
     locked_at: Mapped[datetime | None]

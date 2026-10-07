@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.commands import sync_user_commands
 from app.bot.filters import IsManager
-from app.bot.handlers.sites import set_current_site
+from app.bot.handlers.sites import no_sites_text, set_current_site
 from app.bot.keyboards import InviteLink, invite_keyboard, sites_keyboard
 from app.bot.states import Registration
 from app.config import Settings
@@ -22,29 +22,53 @@ INVITE_PREFIX = "inv_"  # приглашение в компанию
 SITE_INVITE_PREFIX = "site_"  # приглашение сразу на объект
 BAD_INVITE = "Ссылка-приглашение недействительна. Попросите у руководителя новую."
 
-HELP_TEXT = """\
+_HELP_INTRO = """\
 <b>Как пользоваться</b>
 
 1. Выберите объект: /object — все сообщения будут привязаны к нему.
 2. В течение дня присылайте сюда всё с объекта: фото, голосовые, текст.
    Голосовые я расшифрую и пришлю текст ответом.
 3. /report — отчёт по текущему объекту за сегодня, /report вчера — за вчера.
+   Под отчётом: 👎 — написать, что не так, и я пересоберу отчёт с учётом замечания;
+   🔄 — просто собрать заново.
 
 Чтобы сохранить исходное фото с датой съёмки (для споров с заказчиком),
 отправляйте его «файлом», а не как сжатое фото.
 
 <b>Команды</b>
+"""
+
+FOREMAN_HELP = (
+    _HELP_INTRO
+    + """\
 /object — выбрать объект
-/new_object — добавить объект
 /report — отчёт за день
 /archive — выгрузить архив фото и сообщений объекта
-/invite — пригласить прораба на объект (для руководителя)
-/sites — управление объектами (для руководителя)
-/team — команда и роли (для руководителя)
-/settings — время сводки и напоминаний, часовой пояс (для руководителя)
-/stats — статистика за неделю (для руководителя)
+/privacy — персональные данные и отзыв согласия
+/cancel — отменить текущее действие
+
+Новый объект добавляет руководитель — попросите у него ссылку на объект."""
+)
+
+MANAGER_HELP = (
+    _HELP_INTRO
+    + """\
+/report — отчёт по объекту за день
+/stats — статистика за неделю
+/archive — выгрузить архив фото и сообщений объекта
+/sites — управление объектами
+/team — команда и роли
+/invite — пригласить прораба на объект
+/settings — время сводки и напоминаний, часовой пояс
+/new_object — добавить объект
+/object — выбрать свой объект (если сами присылаете сообщения)
 /privacy — персональные данные и отзыв согласия
 /cancel — отменить текущее действие"""
+)
+
+
+def help_text(user: User) -> str:
+    return MANAGER_HELP if user.is_manager else FOREMAN_HELP
 
 
 @router.message(CommandStart())
@@ -109,18 +133,19 @@ async def process_start(
             await bot.send_message(
                 chat_id,
                 text + "Выберите объект, на котором вы сегодня работаете:",
-                reply_markup=sites_keyboard(my_sites, user.current_site_id),
+                reply_markup=sites_keyboard(
+                    my_sites, user.current_site_id, can_create=user.is_manager
+                ),
             )
         else:
             await bot.send_message(
                 chat_id,
-                text + "Вас пока не добавили ни на один объект. Попросите у руководителя "
-                "ссылку на объект или добавьте свой: /new_object",
+                text + no_sites_text(user),
             )
         return
 
     if user.company_id is not None:
-        await bot.send_message(chat_id, HELP_TEXT)
+        await bot.send_message(chat_id, help_text(user))
         return
 
     await state.set_state(Registration.company_name)
@@ -187,8 +212,8 @@ async def on_invite_link(
 
 
 @router.message(Command("help"))
-async def cmd_help(message: Message) -> None:
-    await message.answer(HELP_TEXT)
+async def cmd_help(message: Message, user: User) -> None:
+    await message.answer(help_text(user))
 
 
 @router.message(Command("cancel"))

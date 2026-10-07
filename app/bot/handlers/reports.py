@@ -10,7 +10,14 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.filters import HasCompany
-from app.bot.keyboards import ReportSite, ReportView, feedback_keyboard, report_sites_keyboard
+from app.bot.handlers.sites import no_sites_text
+from app.bot.keyboards import (
+    ReportRebuild,
+    ReportSite,
+    ReportView,
+    feedback_keyboard,
+    report_sites_keyboard,
+)
 from app.config import Settings
 from app.db.models import Site, User
 from app.db.repositories import EntryRepo, ReportJobRepo, ReportRepo, SiteRepo
@@ -48,12 +55,29 @@ async def request_report(
     work_date = today_for(user.company.timezone, settings.work_day_start_hour) - timedelta(
         days=days_ago
     )
-    created = await ReportJobRepo(session).enqueue(site.id, work_date, chat_id, user.id)
+    await enqueue_report(bot, chat_id, site, work_date, user, session)
+
+
+async def enqueue_report(
+    bot: Bot,
+    chat_id: int,
+    site: Site,
+    work_date: date,
+    user: User,
+    session: AsyncSession,
+    *,
+    rebuild: bool = False,
+) -> None:
+    created = await ReportJobRepo(session).enqueue(
+        site.id, work_date, chat_id, user.id, rebuild=rebuild
+    )
     what = f"по «{escape(site.name)}» за {work_date:%d.%m.%Y}"
-    if created:
-        text = f"⏳ Формирую отчёт {what}. Пришлю сюда, как будет готов."
-    else:
+    if not created:
         text = f"⏳ Отчёт {what} уже формируется — пришлю, как будет готов."
+    elif rebuild:
+        text = f"🔄 Пересобираю отчёт {what}. Пришлю сюда, как будет готов."
+    else:
+        text = f"⏳ Формирую отчёт {what}. Пришлю сюда, как будет готов."
     await bot.send_message(chat_id, text)
 
 
@@ -75,7 +99,7 @@ async def cmd_report(
 
     sites = await repo.list_for_user(user)
     if not sites:
-        await message.answer("Объектов пока нет. Добавьте первый: /new_object")
+        await message.answer(no_sites_text(user))
     elif len(sites) == 1:
         await request_report(bot, message.chat.id, sites[0], days_ago, user, session, settings)
     else:
@@ -127,3 +151,18 @@ async def on_report_view(
         last = i == len(chunks) - 1
         markup = feedback_keyboard(site.id, work_date) if last else None
         await bot.send_message(chat_id, chunk, reply_markup=markup)
+
+
+@router.callback_query(ReportRebuild.filter())
+async def on_report_rebuild(
+    call: CallbackQuery, callback_data: ReportRebuild, bot: Bot, user: User, session: AsyncSession
+) -> None:
+    """Собрать отчёт заново, даже если сообщения за день не менялись."""
+    site = await SiteRepo(session).get_for_user(user, callback_data.site_id)
+    if site is None:
+        await call.answer("Объект не найден", show_alert=True)
+        return
+    await call.answer()
+    chat_id = call.message.chat.id if call.message else call.from_user.id
+    work_date = date.fromordinal(callback_data.day)
+    await enqueue_report(bot, chat_id, site, work_date, user, session, rebuild=True)

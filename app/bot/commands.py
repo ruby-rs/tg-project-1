@@ -16,7 +16,6 @@ FOREMAN_COMMANDS = [
     BotCommand(command="report", description="Отчёт за день"),
     BotCommand(command="object", description="Выбрать объект"),
     BotCommand(command="archive", description="Архив объекта"),
-    BotCommand(command="new_object", description="Добавить объект"),
     BotCommand(command="help", description="Как пользоваться"),
     BotCommand(command="privacy", description="Персональные данные"),
 ]

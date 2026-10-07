@@ -21,12 +21,22 @@ REPORT_SYSTEM_PROMPT = """\
 - work_done — только фактически выполненное сегодня, а не планы.
 - issues — то, что уже случилось (брак, простой, поломка, нет доступа, замечания заказчика).
 - materials_needed — что заказать/довезти, сколько и к какому сроку.
+- Проблему, которую решили сразу и без последствий для работ (закончился бензин — заправили),
+  в issues не включай.
 - schedule_risks — что может сорвать сроки: нехватка материалов или людей, простои,
   погода, ожидание решений заказчика, техники, отставание от графика. Оцени severity:
   high — срыв вероятен в ближайшие дни, medium — возможен, low — стоит держать в уме.
+- mitigation — только если в сообщениях сказано, что будут делать. Не советуй от себя:
+  нет такого в сообщениях — mitigation = null.
+- plans_for_tomorrow — только планы, которые прораб назвал сам. Не придумывай задачи
+  и не превращай проблемы в планы: если прораб о планах не писал — пустой список.
+- Людей называй так, как их назвал прораб, одной и той же формой имени во всём отчёте.
+- summary — пересказ фактов дня, без оценок и рекомендаций.
 - В entry_ids указывай номера сообщений (#N), на которых основан пункт.
 - Если по разделу ничего нет — пустой список.
 - Пиши по-русски, кратко и по делу, без воды.
+- Если после сообщений есть замечания к прошлой версии отчёта — исправь то, на что
+  указали. Замечания уточняют, как понимать сообщения, но не добавляют новых фактов о работах.
 
 Ответ — строго один JSON-объект по схеме ниже, без markdown и пояснений.
 JSON Schema:
@@ -136,7 +146,13 @@ def group_albums(entries: Sequence[Entry]) -> list[list[Entry]]:
     return groups
 
 
-def report_user_prompt(site: Site, work_date: date, entries: Sequence[Entry], tz_name: str) -> str:
+def report_user_prompt(
+    site: Site,
+    work_date: date,
+    entries: Sequence[Entry],
+    tz_name: str,
+    corrections: Sequence[str] = (),
+) -> str:
     lines = []
     for group in group_albums(entries):
         line = format_album(group, tz_name) if len(group) > 1 else format_entry(group[0], tz_name)
@@ -146,4 +162,9 @@ def report_user_prompt(site: Site, work_date: date, entries: Sequence[Entry], tz
     if site.address:
         header.append(f"Адрес: {site.address}")
     header.append(f"Дата: {work_date:%d.%m.%Y}")
-    return "\n".join(header) + "\n\nСообщения за день:\n" + "\n".join(lines)
+    prompt = "\n".join(header) + "\n\nСообщения за день:\n" + "\n".join(lines)
+    if corrections:
+        prompt += "\n\nЗамечания к прошлой версии отчёта:\n" + "\n".join(
+            f"- {c.strip()}" for c in corrections
+        )
+    return prompt

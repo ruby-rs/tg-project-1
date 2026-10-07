@@ -146,7 +146,8 @@ def test_system_prompt_schema_is_compact():
     full = json.dumps(SiteDailyReport.model_json_schema(), ensure_ascii=False)
     prompt = report_system_prompt()
     assert '"title"' not in prompt and "anyOf" not in prompt
-    assert len(prompt) < 3 * len(full) // 4 + 1500
+    # Схема сжата на четверть; остальное — правила для модели
+    assert len(prompt) < 3 * len(full) // 4 + 2200
     # Сжатие не теряет полей
     compact = compact_schema(SiteDailyReport.model_json_schema())
     assert set(compact["properties"]) == set(SiteDailyReport.model_fields)

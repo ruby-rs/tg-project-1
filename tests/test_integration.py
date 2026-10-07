@@ -174,7 +174,16 @@ async def test_foreman_sees_only_own_sites(sessionmaker, settings, bot, tg):
     tg.requests.clear()
     await dp.feed_update(bot, make_update(text="/object"))
     keyboard = tg.requests[-1].reply_markup.inline_keyboard
-    assert [row[0].text for row in keyboard] == ["✅ Склад", "➕ Новый объект"]
+    assert [row[0].text for row in keyboard] == ["✅ Склад"]
+
+    # Объекты добавляет только руководитель
+    await dp.feed_update(bot, make_update(text="/new_object"))
+    assert "доступна только руководителю" in tg.sent_texts()[-1]
+    await dp.feed_update(bot, callback_update("newsite"))
+    denied = "Добавить объект может только руководитель."
+    assert any(isinstance(r, AnswerCallbackQuery) and r.text == denied for r in tg.requests)
+    await dp.feed_update(bot, make_update(text="/help"))
+    assert "/team" not in tg.sent_texts()[-1] and "/new_object" not in tg.sent_texts()[-1]
 
     # Чужой объект нельзя выбрать, даже подделав callback
     async with sessionmaker() as s:
