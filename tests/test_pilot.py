@@ -1,5 +1,6 @@
 """Оценка отчётов и статистика для пилота."""
 
+from aiogram.methods import AnswerCallbackQuery
 from sqlalchemy import select
 
 from app.bot.app import build_dispatcher
@@ -48,7 +49,8 @@ async def test_report_feedback(sessionmaker, settings, bot, tg):
     await dp.feed_update(bot, callback_update(dislike.callback_data))
     assert "Что не так в отчёте?" in tg.sent_texts()[-1]
     await dp.feed_update(bot, make_update(text="Объём не 12, а 21 куб"))
-    assert "замечание записал" in tg.sent_texts()[-2]
+    # Ответ пользователя удаляется, вопрос заменяется подтверждением
+    assert "замечание записал" in tg.sent_texts()[-1]
     assert "Пересобираю отчёт" in tg.sent_texts()[-1]
 
     async with sessionmaker() as s:
@@ -132,7 +134,9 @@ async def test_report_rebuild_button(sessionmaker, settings, bot, tg):
     # Кнопка «Пересобрать» — новый запрос к LLM
     [rebuild] = report_msg.reply_markup.inline_keyboard[1]
     await dp.feed_update(bot, callback_update(rebuild.callback_data))
-    assert "Пересобираю отчёт" in tg.sent_texts()[-1]
+    # Отчёт остаётся как есть, о пересборке — всплывающим уведомлением
+    toast = [r for r in tg.requests if isinstance(r, AnswerCallbackQuery)][-1]
+    assert "Пересобираю отчёт" in toast.text
     fresh = fake_openai([REPORT_JSON])
     await _run_report_job(bot, tg, sessionmaker, fresh)
     assert len(fresh.chat.completions.calls) == 1

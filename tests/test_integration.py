@@ -184,7 +184,7 @@ async def test_foreman_sees_only_own_sites(sessionmaker, settings, bot, tg):
     tg.requests.clear()
     await dp.feed_update(bot, make_update(text="/object"))
     keyboard = tg.requests[-1].reply_markup.inline_keyboard
-    assert [row[0].text for row in keyboard] == ["✅ Склад"]
+    assert [row[0].text for row in keyboard] == ["✅ Склад", "← Меню"]
 
     # Объекты добавляет только руководитель
     await dp.feed_update(bot, make_update(text="/new_object"))

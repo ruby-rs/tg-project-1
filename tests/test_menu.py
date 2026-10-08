@@ -1,15 +1,24 @@
-"""Главное меню кнопками и сборник медиа к отчёту."""
+"""Меню по команде /menu с переходами в одном сообщении и сборник медиа к отчёту."""
 
 from datetime import UTC, date, datetime, time
 
 import pytest
-from aiogram.methods import SendDocument, SendMediaGroup, SendMessage, SendPhoto
-from aiogram.types import InputMediaDocument, InputMediaPhoto, InputMediaVideo, ReplyKeyboardMarkup
+from aiogram.methods import (
+    DeleteMessage,
+    EditMessageText,
+    SendDocument,
+    SendMediaGroup,
+    SendMessage,
+    SendPhoto,
+    SetMyCommands,
+)
+from aiogram.types import InputMediaDocument, InputMediaPhoto, InputMediaVideo
 from sqlalchemy import select
 
 from app.bot.app import build_dispatcher
+from app.bot.commands import set_default_commands
 from app.bot.handlers.settings import OFF_VALUE, SettingsAction
-from app.bot.keyboards import Cancel, Menu, ReportMedia, ReportMenu, ReportSite, SiteAdmin
+from app.bot.keyboards import Cancel, Menu, Nav, ReportMedia, ReportMenu, ReportSite, SiteAdmin
 from app.db.models import Company, Entry, EntryKind, ReportJob, Site, User
 from app.services import media as media_service
 from app.services.media import collect_media, send_media_collection
@@ -27,100 +36,126 @@ def _buttons(markup) -> list[str]:
     return [b.text for row in markup.inline_keyboard for b in row]
 
 
-def _menu_buttons(markup: ReplyKeyboardMarkup) -> list[str]:
-    return [b.text for row in markup.keyboard for b in row]
+def _sent(tg) -> list[SendMessage]:
+    return [r for r in tg.requests if isinstance(r, SendMessage)]
 
 
-async def test_menu_follows_role_and_is_not_saved_as_entry(sessionmaker, settings, bot, tg):
+async def test_only_menu_command_is_visible(bot, tg):
+    await set_default_commands(bot)
+    [cmds] = [r for r in tg.requests if isinstance(r, SetMyCommands)]
+    assert [c.command for c in cmds.commands] == ["menu"]
+
+
+async def test_menu_follows_role(sessionmaker, settings, bot, tg):
     dp = build_dispatcher(settings, sessionmaker)
     await register_owner_with_site(dp, bot)
-    owner_menu = next(
-        r.reply_markup
-        for r in tg.requests
-        if isinstance(r, SendMessage) and isinstance(r.reply_markup, ReplyKeyboardMarkup)
-    )
-    assert set(_menu_buttons(owner_menu)) == set(Menu.ALL)
+    # Личный список команд руководителя убран: у всех видна только /menu
+    assert not [r for r in tg.requests if isinstance(r, SetMyCommands)]
+
+    tg.requests.clear()
+    await dp.feed_update(bot, make_update(text="/menu"))
+    # Сообщение «/menu» удаляется, меню приходит одним сообщением с кнопками
+    assert any(isinstance(r, DeleteMessage) and r.chat_id == TG_USER_ID for r in tg.requests)
+    menu = _sent(tg)[-1]
+    assert menu.text.startswith("☰ <b>Меню</b>")
+    assert "📍 Текущий объект: ЖК Северный" in menu.text
+    assert _buttons(menu.reply_markup) == [
+        Menu.REPORT,
+        Menu.STATS,
+        Menu.SITES,
+        Menu.TEAM,
+        Menu.INVITE,
+        Menu.SETTINGS,
+        Menu.ARCHIVE,
+        Menu.SITE,
+        Menu.HELP,
+    ]
 
     await join_foreman_to_site(dp, bot, sessionmaker)
-    foreman_menu = [
-        r.reply_markup
-        for r in tg.requests
-        if isinstance(r, SendMessage)
-        and r.chat_id == FOREMAN_ID
-        and isinstance(r.reply_markup, ReplyKeyboardMarkup)
-    ][-1]
-    assert _menu_buttons(foreman_menu) == list(Menu.FOREMAN)
-
-    # Кнопка руководителя у прораба (меню от прежней роли) — отказ и новое меню
-    await dp.feed_update(bot, make_update(user_id=FOREMAN_ID, text=Menu.TEAM))
+    await dp.feed_update(bot, make_update(user_id=FOREMAN_ID, text="/menu"))
+    assert _buttons(_sent(tg)[-1].reply_markup) == [
+        Menu.REPORT,
+        Menu.SITE,
+        Menu.ARCHIVE,
+        Menu.HELP,
+    ]
+    # Раздел руководителя по старой кнопке — отказ, без новых сообщений
+    await dp.feed_update(bot, callback_update(Nav(to="team").pack(), user_id=FOREMAN_ID))
     assert "только руководителю" in tg.sent_texts()[-1]
 
-    # Нажатия кнопок не попадают в отчёт как сообщения с объекта
-    for text in Menu.ALL:
-        await dp.feed_update(bot, make_update(text=text))
-    async with sessionmaker() as s:
-        assert await s.scalar(select(Entry)) is None
 
-
-async def test_report_by_buttons(sessionmaker, settings, bot, tg):
+async def test_navigation_edits_one_message(sessionmaker, settings, bot, tg):
     dp = build_dispatcher(settings, sessionmaker)
     await register_owner_with_site(dp, bot)
     await register_site(dp, bot, "Склад")
     async with sessionmaker() as s:
         site = await s.scalar(select(Site).where(Site.name == "Склад"))
 
-    # У руководителя два объекта: сначала выбор объекта, потом дня
     tg.requests.clear()
-    await dp.feed_update(bot, make_update(text=Menu.REPORT))
+    # У руководителя два объекта: объект → день → отчёт поставлен в очередь
+    await dp.feed_update(bot, callback_update(Nav(to="report").pack()))
     assert tg.sent_texts()[-1] == "📋 По какому объекту отчёт?"
     assert "🏗 Склад" in _buttons(tg.requests[-1].reply_markup)
-
     await dp.feed_update(bot, callback_update(ReportMenu(site_id=site.id).pack()))
-    assert "Склад" in tg.sent_texts()[-1]
     days = _buttons(tg.requests[-1].reply_markup)
-    assert days == ["Сегодня", "Вчера", "Позавчера", "🏗 Другой объект"]
-
+    assert days == ["Сегодня", "Вчера", "Позавчера", "🏗 Другой объект", "← Меню"]
     await dp.feed_update(bot, callback_update(ReportSite(site_id=site.id, days_ago=1).pack()))
     assert "⏳ Формирую отчёт по «Склад»" in tg.sent_texts()[-1]
+
+    # Переименование: вопрос в том же сообщении, ответ пользователя удаляется
+    await dp.feed_update(bot, callback_update(Nav(to="sites").pack()))
+    await dp.feed_update(bot, callback_update(SiteAdmin(action="rename", site_id=site.id).pack()))
+    rename = make_update(text="Склад №2")
+    await dp.feed_update(bot, rename)
+    assert any(
+        isinstance(r, DeleteMessage) and r.message_id == rename.message.message_id
+        for r in tg.requests
+    )
+    edited = [r for r in tg.requests if isinstance(r, EditMessageText)][-1]
+    assert edited.message_id == 1 and "✅ Название изменено" in edited.text
+
+    # Ни одного нового сообщения — всё правками
+    assert _sent(tg) == []
     async with sessionmaker() as s:
         job = await s.scalar(select(ReportJob))
-    assert job.site_id == site.id
+        assert (await s.get(Site, site.id)).name == "Склад №2"
     today = today_for(settings.default_timezone, settings.work_day_start_hour)
-    assert (today - job.work_date).days == 1
+    assert job.site_id == site.id and (today - job.work_date).days == 1
 
 
 async def register_site(dp, bot, name: str) -> None:
-    await dp.feed_update(bot, make_update(text=Menu.SITES))
     await dp.feed_update(bot, callback_update("newsite"))
     await dp.feed_update(bot, make_update(text=name))
 
 
-async def test_menu_button_interrupts_dialog(sessionmaker, settings, bot, tg):
+async def test_menu_interrupts_dialog_and_old_buttons(sessionmaker, settings, bot, tg):
     dp = build_dispatcher(settings, sessionmaker)
     await register_owner_with_site(dp, bot)
     async with sessionmaker() as s:
         site = await s.scalar(select(Site))
 
-    # Начали переименование и передумали — нажали кнопку меню
+    # Начали переименование и передумали — открыли меню
     await dp.feed_update(bot, callback_update(SiteAdmin(action="rename", site_id=site.id).pack()))
     assert _buttons(tg.requests[-1].reply_markup) == ["✖️ Отмена"]
-    await dp.feed_update(bot, make_update(text=Menu.REPORT))
-    async with sessionmaker() as s:
-        assert (await s.get(Site, site.id)).name == "ЖК Северный"
-
-    # Или нажали «Отмена» под вопросом
+    await dp.feed_update(bot, make_update(text="/menu"))
+    # Или нажали «Отмена» — сообщение с вопросом снова становится меню
     await dp.feed_update(bot, callback_update(SiteAdmin(action="rename", site_id=site.id).pack()))
     await dp.feed_update(bot, callback_update(Cancel().pack()))
+    assert tg.sent_texts()[-1].startswith("☰ <b>Меню</b>")
+
+    # Кнопки прежнего меню под полем ввода открывают новое и не сохраняются как сообщения
+    for text in Menu.LEGACY:
+        await dp.feed_update(bot, make_update(text=text))
     await dp.feed_update(bot, make_update(text="Новое имя"))
     async with sessionmaker() as s:
         assert (await s.get(Site, site.id)).name == "ЖК Северный"
-        assert await s.scalar(select(Entry.text)) == "Новое имя"  # обычное сообщение
+        assert list(await s.scalars(select(Entry.text))) == ["Новое имя"]
 
 
 async def test_settings_time_by_buttons(sessionmaker, settings, bot, tg):
     dp = build_dispatcher(settings, sessionmaker)
     await register_owner_with_site(dp, bot)
-    await dp.feed_update(bot, make_update(text=Menu.SETTINGS))
+    await dp.feed_update(bot, callback_update(Nav(to="settings").pack()))
     await dp.feed_update(bot, callback_update(SettingsAction(action="digest").pack()))
     assert "20:00" in _buttons(tg.requests[-1].reply_markup)
     await dp.feed_update(bot, callback_update(SettingsAction(action="dset", value=20 * 60).pack()))

@@ -12,6 +12,8 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.bot.filters import IsManager
+from app.bot.keyboards import with_menu
+from app.bot.screens import ask, reply_to_input, show
 from app.bot.states import CompanySettings
 from app.db.models import Company, User
 
@@ -93,7 +95,7 @@ def settings_keyboard() -> InlineKeyboardMarkup:
     kb.button(text="📅 Рабочие дни", callback_data=SettingsAction(action="days"))
     kb.button(text="🌍 Часовой пояс", callback_data=SettingsAction(action="tz"))
     kb.adjust(2, 2)
-    return kb.as_markup()
+    return with_menu(kb.as_markup())
 
 
 def days_keyboard(work_days: str) -> InlineKeyboardMarkup:
@@ -130,9 +132,14 @@ def tz_keyboard() -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def settings_screen(user: User) -> tuple[str, InlineKeyboardMarkup]:
+    return settings_text(user.company), settings_keyboard()
+
+
 @router.message(Command("settings"))
 async def cmd_settings(message: Message, user: User) -> None:
-    await message.answer(settings_text(user.company), reply_markup=settings_keyboard())
+    text, markup = settings_screen(user)
+    await message.answer(text, reply_markup=markup)
 
 
 @router.callback_query(SettingsAction.filter())
@@ -141,9 +148,6 @@ async def on_settings_action(
 ) -> None:
     company = user.company
     action = callback_data.action
-    await call.answer()
-    if call.message is None:
-        return
 
     if action in ("digest", "reminder"):
         # Можно нажать готовое время или написать своё, например 19:30
@@ -151,9 +155,11 @@ async def on_settings_action(
             CompanySettings.digest_time if action == "digest" else CompanySettings.reminder_time
         )
         what = "вечернюю сводку" if action == "digest" else "напоминание прорабам"
-        await call.message.edit_text(
+        await ask(
+            call,
+            state,
             f"Во сколько присылать {what}? Выберите время или напишите своё, например 19:30.",
-            reply_markup=time_keyboard("dset" if action == "digest" else "rset"),
+            time_keyboard("dset" if action == "digest" else "rset"),
         )
         return
 
@@ -167,9 +173,7 @@ async def on_settings_action(
             company.reminder_time = value
 
     if action == "days":
-        await call.message.edit_text(
-            "Отметьте рабочие дни:", reply_markup=days_keyboard(company.work_days)
-        )
+        await show(call, "Отметьте рабочие дни:", days_keyboard(company.work_days))
         return
 
     if action == "day" and 1 <= callback_data.value <= 7:
@@ -177,11 +181,11 @@ async def on_settings_action(
         days = set(company.work_days)
         days.symmetric_difference_update({day})
         company.work_days = "".join(sorted(days))
-        await call.message.edit_reply_markup(reply_markup=days_keyboard(company.work_days))
+        await show(call, "Отметьте рабочие дни:", days_keyboard(company.work_days))
         return
 
     if action == "tz":
-        await call.message.edit_text("Выберите часовой пояс компании:", reply_markup=tz_keyboard())
+        await show(call, "Выберите часовой пояс компании:", tz_keyboard())
         return
 
     if action == "tzset" and 0 <= callback_data.value < len(TIMEZONES):
@@ -189,22 +193,29 @@ async def on_settings_action(
     if action == "card":
         await state.clear()
 
-    await call.message.edit_text(settings_text(company), reply_markup=settings_keyboard())
+    await show(call, settings_text(company), settings_keyboard())
 
 
 @router.message(CompanySettings.digest_time, F.text & ~F.text.startswith("/"))
 @router.message(CompanySettings.reminder_time, F.text & ~F.text.startswith("/"))
 async def on_time_input(message: Message, user: User, state: FSMContext) -> None:
+    data = await state.get_data()
+    digest = await state.get_state() == CompanySettings.digest_time.state
     try:
         value = parse_time(message.text)
     except ValueError:
-        await message.answer("Не понял время. Напишите, например, 19:00 или «выкл».")
+        await reply_to_input(
+            message,
+            data,
+            "Не понял время. Выберите кнопкой или напишите, например, 19:00.",
+            time_keyboard("dset" if digest else "rset"),
+        )
         return
-    if await state.get_state() == CompanySettings.digest_time.state:
+    if digest:
         user.company.digest_time = value
     else:
         user.company.reminder_time = value
     await state.clear()
-    await message.answer(
-        "✅ Сохранено.\n\n" + settings_text(user.company), reply_markup=settings_keyboard()
+    await reply_to_input(
+        message, data, "✅ Сохранено.\n\n" + settings_text(user.company), settings_keyboard()
     )

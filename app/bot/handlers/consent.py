@@ -15,14 +15,14 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardMarkup,
     Message,
-    ReplyKeyboardRemove,
     TelegramObject,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.handlers.start import process_start
-from app.bot.keyboards import ConsentAction
+from app.bot.keyboards import ConsentAction, Nav, with_menu
+from app.bot.screens import delete_quietly, drop_reply_keyboard, show
 from app.config import Settings
 from app.db.models import User
 
@@ -100,7 +100,8 @@ async def on_accept(
     await call.answer("Спасибо!")
     chat_id = call.message.chat.id if call.message else call.from_user.id
     if call.message:
-        await call.message.edit_reply_markup(reply_markup=None)
+        # Время согласия записано в БД; длинный текст из чата убираем
+        await delete_quietly(bot, chat_id, call.message.message_id)
     await process_start(bot, chat_id, args, user, session, state)
 
 
@@ -129,7 +130,9 @@ def privacy_text(settings: Settings) -> str:
 def privacy_keyboard() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="Отозвать согласие", callback_data=ConsentAction(action="revoke"))
-    return kb.as_markup()
+    kb.button(text="← Помощь", callback_data=Nav(to="help"))
+    kb.adjust(1)
+    return with_menu(kb.as_markup())
 
 
 @router.message(Command("privacy"))
@@ -139,18 +142,13 @@ async def cmd_privacy(message: Message, settings: Settings) -> None:
 
 @router.callback_query(ConsentAction.filter(F.action == "privacy"))
 async def on_privacy(call: CallbackQuery, settings: Settings) -> None:
-    await call.answer()
-    if call.message:
-        await call.message.answer(privacy_text(settings), reply_markup=privacy_keyboard())
+    await show(call, privacy_text(settings), privacy_keyboard())
 
 
 @router.callback_query(ConsentAction.filter(F.action == "revoke"))
-async def on_revoke(call: CallbackQuery, user: User, state: FSMContext) -> None:
+async def on_revoke(call: CallbackQuery, bot: Bot, user: User, state: FSMContext) -> None:
     user.consent_at = None
     await state.clear()
-    await call.answer()
+    await show(call, "Согласие отозвано. Чтобы снова пользоваться ботом, нажмите /start.")
     if call.message:
-        await call.message.edit_text("Согласие отозвано.")
-        await call.message.answer(
-            "Чтобы снова пользоваться ботом, нажмите /start.", reply_markup=ReplyKeyboardRemove()
-        )
+        await drop_reply_keyboard(bot, call.message.chat.id)

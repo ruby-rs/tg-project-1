@@ -2,13 +2,12 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
-from app.bot.commands import FOREMAN_COMMANDS, MANAGER_COMMANDS
-from app.bot.keyboards import cancel_keyboard, main_menu
+from app.bot.keyboards import cancel_keyboard, home_text, main_menu
 from app.db.models import User
 
 router = Router(name="fallback")
 
-MANAGER_ONLY = {c.command for c in MANAGER_COMMANDS} - {c.command for c in FOREMAN_COMMANDS}
+MANAGER_ONLY = {"stats", "sites", "team", "invite", "settings", "new_object"}
 
 
 @router.message(F.text.startswith("/"))
@@ -19,13 +18,12 @@ async def unknown_command(message: Message, user: User | None = None) -> None:
     elif command in MANAGER_ONLY:
         await message.answer(
             f"/{command} доступна только руководителю. "
-            "Назначить руководителем может владелец компании в «👥 Команда».",
+            "Назначить руководителем может владелец компании в «👥 Команда».\n\n" + home_text(user),
             reply_markup=main_menu(user),
         )
     else:
         await message.answer(
-            "Не знаю такой команды. Пользуйтесь кнопками меню внизу — «❓ Помощь» "
-            "расскажет, что где.",
+            "Не знаю такой команды — всё есть в меню.\n\n" + home_text(user),
             reply_markup=main_menu(user),
         )
 

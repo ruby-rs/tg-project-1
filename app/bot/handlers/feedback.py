@@ -3,7 +3,7 @@
 from datetime import date, timedelta
 from html import escape
 
-from aiogram import Bot, F, Router
+from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
@@ -13,7 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.filters import HasCompany, IsManager
 from app.bot.handlers.reports import enqueue_report
-from app.bot.keyboards import Feedback, cancel_keyboard
+from app.bot.keyboards import Feedback, cancel_keyboard, with_menu
+from app.bot.screens import PROMPT_KEY, reply_to_input
 from app.bot.states import FeedbackComment
 from app.config import Settings
 from app.db.models import EntryKind, User
@@ -66,29 +67,34 @@ async def on_feedback(
     await state.set_state(FeedbackComment.text)
     await state.update_data(site_id=site.id, day=callback_data.day)
     if call.message:
-        await call.message.answer(
+        # Отдельным сообщением: отчёт, под которым нажали 👎, остаётся как есть
+        prompt = await call.message.answer(
             "Что не так в отчёте? Напишите коротко: неверный объём, пропущена работа, "
             "лишнее и т.п. Я пересоберу отчёт с учётом замечания.",
-            reply_markup=cancel_keyboard("Пропустить"),
+            reply_markup=cancel_keyboard("Пропустить", drop=True),
         )
+        await state.update_data({PROMPT_KEY: prompt.message_id})
 
 
 @router.message(FeedbackComment.text, F.text & ~F.text.startswith("/"))
 async def on_feedback_comment(
-    message: Message, bot: Bot, user: User, session: AsyncSession, state: FSMContext
+    message: Message, user: User, session: AsyncSession, state: FSMContext
 ) -> None:
     data = await state.get_data()
     await state.clear()
-    site = None
+    text = "Спасибо, замечание записал."
     if "site_id" in data and "day" in data:
         work_date = date.fromordinal(data["day"])
         await FeedbackRepo(session).comment(
             data["site_id"], work_date, user.id, message.text.strip()
         )
         site = await SiteRepo(session).get_for_user(user, data["site_id"])
-    await message.answer("Спасибо, замечание записал и учту его в отчёте.")
-    if site is not None:
-        await enqueue_report(bot, message.chat.id, site, work_date, user, session, rebuild=True)
+        if site is not None:
+            status = await enqueue_report(
+                message.chat.id, site, work_date, user, session, rebuild=True
+            )
+            text += "\n" + status
+    await reply_to_input(message, data, text)
 
 
 # ---------- Статистика для руководителя ----------
@@ -132,23 +138,29 @@ def render_stats(st: CompanyStats) -> str:
     return "\n".join(lines)[:TG_MESSAGE_LIMIT]
 
 
-def stats_keyboard(st: CompanyStats) -> InlineKeyboardMarkup | None:
-    if not st.failed:
-        return None
+def stats_keyboard(st: CompanyStats) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text=f"🔁 Повторить обработку ({st.failed})", callback_data=RetryFailed())
-    return kb.as_markup()
+    if st.failed:
+        kb.button(text=f"🔁 Повторить обработку ({st.failed})", callback_data=RetryFailed())
+    return with_menu(kb.as_markup())
+
+
+async def stats_screen(
+    user: User, session: AsyncSession, settings: Settings
+) -> tuple[str, InlineKeyboardMarkup]:
+    today = today_for(user.company.timezone, settings.work_day_start_hour)
+    stats = await StatsRepo(session).collect(
+        user.company_id, today - timedelta(days=STATS_DAYS - 1), today
+    )
+    return render_stats(stats), stats_keyboard(stats)
 
 
 @router.message(Command("stats"), IsManager())
 async def cmd_stats(
     message: Message, user: User, session: AsyncSession, settings: Settings
 ) -> None:
-    today = today_for(user.company.timezone, settings.work_day_start_hour)
-    stats = await StatsRepo(session).collect(
-        user.company_id, today - timedelta(days=STATS_DAYS - 1), today
-    )
-    await message.answer(render_stats(stats), reply_markup=stats_keyboard(stats))
+    text, markup = await stats_screen(user, session, settings)
+    await message.answer(text, reply_markup=markup)
 
 
 @router.callback_query(RetryFailed.filter(), IsManager())
