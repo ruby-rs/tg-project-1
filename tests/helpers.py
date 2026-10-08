@@ -19,7 +19,11 @@ from aiogram.methods import (
     GetMe,
     SendChatAction,
     SendDocument,
+    SendMediaGroup,
     SendMessage,
+    SendPhoto,
+    SendVideo,
+    SendVideoNote,
     SetMessageReaction,
     SetMyCommands,
     TelegramMethod,
@@ -43,6 +47,23 @@ class MockedSession(BaseSession):
             return TgUser(id=123456, is_bot=True, first_name="Bot", username="prorab_test_bot")
         if isinstance(method, GetFile):
             return File(file_id=method.file_id, file_unique_id="u", file_path=method.file_id)
+        if isinstance(method, SendMediaGroup):
+            return [
+                Message(
+                    message_id=10_000 + len(self.requests) * 100 + i,
+                    date=datetime.now(UTC),
+                    chat=Chat(id=method.chat_id, type="private"),
+                )
+                for i, _ in enumerate(method.media)
+            ]
+        if isinstance(method, SendPhoto | SendVideo | SendVideoNote) or (
+            isinstance(method, SendDocument) and isinstance(method.document, str)
+        ):
+            return Message(
+                message_id=10_000 + len(self.requests),
+                date=datetime.now(UTC),
+                chat=Chat(id=method.chat_id, type="private"),
+            )
         if isinstance(method, SendDocument):
             path = method.document.path
             # Временный файл удалят сразу после отправки — забираем содержимое сейчас

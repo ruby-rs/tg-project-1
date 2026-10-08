@@ -3,14 +3,23 @@ from html import escape
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, ReplyKeyboardRemove
 from aiogram.utils.deep_linking import create_start_link
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.commands import sync_user_commands
 from app.bot.filters import IsManager
 from app.bot.handlers.sites import no_sites_text, set_current_site
-from app.bot.keyboards import InviteLink, invite_keyboard, sites_keyboard
+from app.bot.keyboards import (
+    ConsentAction,
+    InviteLink,
+    Menu,
+    NewSite,
+    invite_keyboard,
+    main_menu,
+    sites_keyboard,
+)
 from app.bot.states import Registration
 from app.config import Settings
 from app.db.models import Company, User, UserRole
@@ -25,45 +34,36 @@ BAD_INVITE = "Ссылка-приглашение недействительна
 _HELP_INTRO = """\
 <b>Как пользоваться</b>
 
-1. Выберите объект: /object — все сообщения будут привязаны к нему.
-2. В течение дня присылайте сюда всё с объекта: фото, голосовые, текст.
+Всё делается кнопками меню под полем ввода — команды набирать не нужно.
+
+1. «📍 Объект» — выберите объект, все сообщения будут привязаны к нему.
+2. В течение дня присылайте сюда всё с объекта: фото, видео, голосовые, текст.
    Голосовые я расшифрую и пришлю текст ответом.
-3. /report — отчёт по текущему объекту за сегодня, /report вчера — за вчера.
-   Под отчётом: 👎 — написать, что не так, и я пересоберу отчёт с учётом замечания;
-   🔄 — просто собрать заново.
+3. «📋 Отчёт» — выберите день, и я соберу отчёт. Вместе с отчётом пришлю
+   альбомом фото и видео за этот день. Под отчётом: 👎 — написать, что не так,
+   и я пересоберу отчёт с учётом замечания; 🔄 — просто собрать заново;
+   📸 — ещё раз прислать фото и видео.
+4. «🗂 Архив» — выгрузить архив объекта за период одним ZIP-файлом.
 
 Чтобы сохранить исходное фото с датой съёмки (для споров с заказчиком),
 отправляйте его «файлом», а не как сжатое фото.
-
-<b>Команды</b>
 """
 
 FOREMAN_HELP = (
     _HELP_INTRO
-    + """\
-/object — выбрать объект
-/report — отчёт за день
-/archive — выгрузить архив фото и сообщений объекта
-/privacy — персональные данные и отзыв согласия
-/cancel — отменить текущее действие
-
+    + """
 Новый объект добавляет руководитель — попросите у него ссылку на объект."""
 )
 
 MANAGER_HELP = (
     _HELP_INTRO
-    + """\
-/report — отчёт по объекту за день
-/stats — статистика за неделю
-/archive — выгрузить архив фото и сообщений объекта
-/sites — управление объектами
-/team — команда и роли
-/invite — пригласить прораба на объект
-/settings — время сводки и напоминаний, часовой пояс
-/new_object — добавить объект
-/object — выбрать свой объект (если сами присылаете сообщения)
-/privacy — персональные данные и отзыв согласия
-/cancel — отменить текущее действие"""
+    + """
+<b>Для руководителя</b>
+«📊 Статистика» — расшифровки, оценки отчётов, активность прорабов за неделю
+«🏗 Объекты» — добавить объект, название, адрес, ссылка для прораба, закрыть объект
+«👥 Команда» — роли и состав команды
+«🔗 Пригласить» — ссылка-приглашение для прораба
+«⚙️ Настройки» — время вечерней сводки и напоминаний, рабочие дни, часовой пояс"""
 )
 
 
@@ -115,7 +115,10 @@ async def process_start(
         await sites.add_member(site.id, user.id)
         text = await set_current_site(session, user, site)
         await bot.send_message(
-            chat_id, f"👷 Вы подключены к компании «{escape(site.company.name)}».\n{text}"
+            chat_id,
+            f"👷 Вы подключены к компании «{escape(site.company.name)}».\n{text}\n\n"
+            "Присылайте сюда фото, голосовые и текст с объекта. Меню — кнопками внизу.",
+            reply_markup=main_menu(user),
         )
         return
 
@@ -128,24 +131,24 @@ async def process_start(
             return
         await session.flush()
         my_sites = await sites.list_for_user(user)
-        text = f"👷 Вы подключены к компании «{escape(company.name)}».\n\n"
+        text = f"👷 Вы подключены к компании «{escape(company.name)}»."
         if my_sites:
+            await bot.send_message(chat_id, text, reply_markup=main_menu(user))
             await bot.send_message(
                 chat_id,
-                text + "Выберите объект, на котором вы сегодня работаете:",
+                "Выберите объект, на котором вы сегодня работаете:",
                 reply_markup=sites_keyboard(
                     my_sites, user.current_site_id, can_create=user.is_manager
                 ),
             )
         else:
             await bot.send_message(
-                chat_id,
-                text + no_sites_text(user),
+                chat_id, f"{text}\n\n{no_sites_text(user)}", reply_markup=main_menu(user)
             )
         return
 
     if user.company_id is not None:
-        await bot.send_message(chat_id, help_text(user))
+        await bot.send_message(chat_id, help_text(user), reply_markup=main_menu(user))
         return
 
     await state.set_state(Registration.company_name)
@@ -155,10 +158,11 @@ async def process_start(
         "превращаю в структурированный дневной отчёт.\n\n"
         "Если вы <b>руководитель</b> — напишите название компании, и я её зарегистрирую.\n"
         "Если вы <b>прораб</b> — попросите у руководителя ссылку-приглашение.",
+        reply_markup=ReplyKeyboardRemove(),
     )
 
 
-@router.message(Registration.company_name, F.text & ~F.text.startswith("/"))
+@router.message(Registration.company_name, F.text & ~F.text.startswith("/") & ~F.text.in_(Menu.ALL))
 async def register_company(
     message: Message,
     bot: Bot,
@@ -177,10 +181,14 @@ async def register_company(
     await message.answer(
         f"🏗 Компания «{escape(company.name)}» создана, вы — руководитель.\n\n"
         "Дальше:\n"
-        "1. /new_object — добавьте объекты\n"
-        "2. /invite — отправьте ссылку прорабам\n\n"
-        "Вы тоже можете присылать сюда фото и голосовые с объектов."
+        "1. Добавьте объекты — кнопка ниже или «🏗 Объекты» в меню\n"
+        "2. «🔗 Пригласить» — отправьте ссылку прорабам\n\n"
+        "Вы тоже можете присылать сюда фото и голосовые с объектов.",
+        reply_markup=main_menu(user),
     )
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Добавить объект", callback_data=NewSite())
+    await message.answer("Начнём с первого объекта:", reply_markup=kb.as_markup())
 
 
 @router.message(Command("invite"), IsManager())
@@ -211,12 +219,21 @@ async def on_invite_link(
         await call.message.answer(f"Ссылка-приглашение {target} — перешлите её прорабу:\n\n{link}")
 
 
+def help_keyboard() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔒 Персональные данные", callback_data=ConsentAction(action="privacy"))
+    return kb.as_markup()
+
+
 @router.message(Command("help"))
 async def cmd_help(message: Message, user: User) -> None:
-    await message.answer(help_text(user))
+    await message.answer(help_text(user), reply_markup=help_keyboard())
 
 
 @router.message(Command("cancel"))
-async def cmd_cancel(message: Message, state: FSMContext) -> None:
+async def cmd_cancel(message: Message, user: User, state: FSMContext) -> None:
     await state.clear()
-    await message.answer("Отменено.")
+    if user.company_id is None:
+        await message.answer("Отменено.")
+    else:
+        await message.answer("Отменено.", reply_markup=main_menu(user))

@@ -10,23 +10,25 @@ from html import escape
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject, CommandStart, Filter
-from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, TelegramObject
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    Message,
+    ReplyKeyboardRemove,
+    TelegramObject,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.handlers.start import process_start
+from app.bot.keyboards import ConsentAction
 from app.config import Settings
 from app.db.models import User
 
 router = Router(name="consent")
 
 START_ARGS_KEY = "consent_start_args"
-
-
-class ConsentAction(CallbackData, prefix="consent"):
-    action: str  # accept | revoke
 
 
 class NeedsConsent(Filter):
@@ -54,7 +56,10 @@ def consent_text(settings: Settings) -> str:
             "",
             f'<a href="{escape(settings.privacy_policy_url)}">Политика конфиденциальности</a>',
         ]
-    lines += ["", "Отозвать согласие можно в любой момент командой /privacy."]
+    lines += [
+        "",
+        "Отозвать согласие можно в любой момент: «❓ Помощь» → «🔒 Персональные данные».",
+    ]
     return "\n".join(lines)
 
 
@@ -104,8 +109,7 @@ async def callback_without_consent(call: CallbackQuery) -> None:
     await call.answer("Сначала дайте согласие на обработку данных: /start", show_alert=True)
 
 
-@router.message(Command("privacy"))
-async def cmd_privacy(message: Message, settings: Settings) -> None:
+def privacy_text(settings: Settings) -> str:
     lines = ["🔒 <b>Персональные данные</b>", ""]
     if settings.pd_operator:
         lines.append(f"Оператор: {escape(settings.pd_operator)}")
@@ -119,9 +123,25 @@ async def cmd_privacy(message: Message, settings: Settings) -> None:
     )
     if settings.support_contact:
         lines.append(f"Чтобы удалить свои данные, напишите: {escape(settings.support_contact)}")
+    return "\n".join(lines)
+
+
+def privacy_keyboard() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="Отозвать согласие", callback_data=ConsentAction(action="revoke"))
-    await message.answer("\n".join(lines), reply_markup=kb.as_markup())
+    return kb.as_markup()
+
+
+@router.message(Command("privacy"))
+async def cmd_privacy(message: Message, settings: Settings) -> None:
+    await message.answer(privacy_text(settings), reply_markup=privacy_keyboard())
+
+
+@router.callback_query(ConsentAction.filter(F.action == "privacy"))
+async def on_privacy(call: CallbackQuery, settings: Settings) -> None:
+    await call.answer()
+    if call.message:
+        await call.message.answer(privacy_text(settings), reply_markup=privacy_keyboard())
 
 
 @router.callback_query(ConsentAction.filter(F.action == "revoke"))
@@ -130,6 +150,7 @@ async def on_revoke(call: CallbackQuery, user: User, state: FSMContext) -> None:
     await state.clear()
     await call.answer()
     if call.message:
-        await call.message.edit_text(
-            "Согласие отозвано. Чтобы снова пользоваться ботом, нажмите /start."
+        await call.message.edit_text("Согласие отозвано.")
+        await call.message.answer(
+            "Чтобы снова пользоваться ботом, нажмите /start.", reply_markup=ReplyKeyboardRemove()
         )

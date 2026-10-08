@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.filters import HasCompany, IsManager
 from app.bot.handlers.reports import enqueue_report
-from app.bot.keyboards import Feedback
+from app.bot.keyboards import Feedback, cancel_keyboard
 from app.bot.states import FeedbackComment
 from app.config import Settings
 from app.db.models import EntryKind, User
@@ -68,7 +68,8 @@ async def on_feedback(
     if call.message:
         await call.message.answer(
             "Что не так в отчёте? Напишите коротко: неверный объём, пропущена работа, "
-            "лишнее и т.п. Это поможет улучшить бота. Пропустить — /cancel"
+            "лишнее и т.п. Я пересоберу отчёт с учётом замечания.",
+            reply_markup=cancel_keyboard("Пропустить"),
         )
 
 

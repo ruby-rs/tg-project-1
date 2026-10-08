@@ -6,7 +6,7 @@ Telegram API подменён MockedSession, LLM и Whisper — фейками.
 import asyncio
 from datetime import UTC, date, datetime, timedelta
 
-from aiogram.methods import AnswerCallbackQuery, SetMessageReaction
+from aiogram.methods import AnswerCallbackQuery, SendMessage, SendPhoto, SetMessageReaction
 from sqlalchemy import select
 
 from app.bot.app import build_dispatcher
@@ -118,9 +118,19 @@ async def test_full_flow(sessionmaker, settings, bot, tg, tmp_path):
     reports = ReportQueue(sessionmaker, bot, ReportService(LLMClient(llm_client, "m")))
     job_ids = await reports.claim(10)
     assert len(job_ids) == 1  # повторный /report не создал вторую задачу
+    tg.requests.clear()
     await reports.handle(job_ids[0])
-    report_text = tg.sent_texts()[-1]
+    report_text, media_title = tg.sent_texts()[-2:]
     assert "ЖК Северный" in report_text
+    # Вслед за отчётом — сборник медиа за день: фото пересылается по file_id
+    assert media_title.startswith("📸 <b>Медиа за")
+    assert "фото 1" in media_title
+    [photo] = [r for r in tg.requests if isinstance(r, SendPhoto)]
+    assert photo.photo == "photo-file" and "Каркас плиты" in photo.caption
+    report_markup = next(
+        r.reply_markup for r in tg.requests if isinstance(r, SendMessage) and r.text == report_text
+    )
+    assert "📸 Медиа за день (1)" in [b.text for row in report_markup.inline_keyboard for b in row]
     assert "Бетонирование перекрытия — <b>12 м³</b>" in report_text
     assert "🔴 Нет крана на завтра" in report_text
     user_prompt = llm_client.chat.completions.calls[0]["messages"][1]["content"]

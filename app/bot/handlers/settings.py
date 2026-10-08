@@ -40,8 +40,13 @@ OFF_WORDS = {"выкл", "выключить", "нет", "off", "-", "—"}
 
 
 class SettingsAction(CallbackData, prefix="st"):
-    action: str  # card | digest | reminder | days | day | tz | tzset
-    value: int = 0
+    action: str  # card | digest | reminder | dset | rset | days | day | tz | tzset
+    value: int = 0  # для dset/rset — минуты от полуночи, OFF_VALUE — выключить
+
+
+OFF_VALUE = -1
+DIGEST_PRESETS = [time(h, 0) for h in (17, 18, 19, 20, 21, 22)]
+REMINDER_PRESETS = [time(h, 0) for h in (14, 15, 16, 17, 18, 19)]
 
 
 def parse_time(text: str) -> time | None:
@@ -101,6 +106,21 @@ def days_keyboard(work_days: str) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def time_keyboard(action: str) -> InlineKeyboardMarkup:
+    """Время сводки (dset) или напоминания (rset) — кнопками, без ввода."""
+    presets = DIGEST_PRESETS if action == "dset" else REMINDER_PRESETS
+    kb = InlineKeyboardBuilder()
+    for t in presets:
+        kb.button(
+            text=t.strftime("%H:%M"),
+            callback_data=SettingsAction(action=action, value=t.hour * 60 + t.minute),
+        )
+    kb.button(text="🔕 Выключить", callback_data=SettingsAction(action=action, value=OFF_VALUE))
+    kb.button(text="← Назад", callback_data=SettingsAction(action="card"))
+    kb.adjust(3, 3, 1, 1)
+    return kb.as_markup()
+
+
 def tz_keyboard() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for i, (title, _) in enumerate(TIMEZONES):
@@ -126,15 +146,25 @@ async def on_settings_action(
         return
 
     if action in ("digest", "reminder"):
+        # Можно нажать готовое время или написать своё, например 19:30
         await state.set_state(
             CompanySettings.digest_time if action == "digest" else CompanySettings.reminder_time
         )
         what = "вечернюю сводку" if action == "digest" else "напоминание прорабам"
-        await call.message.answer(
-            f"Во сколько присылать {what}? Напишите, например, <b>19:00</b> "
-            "или «выкл», чтобы отключить. Отменить — /cancel"
+        await call.message.edit_text(
+            f"Во сколько присылать {what}? Выберите время или напишите своё, например 19:30.",
+            reply_markup=time_keyboard("dset" if action == "digest" else "rset"),
         )
         return
+
+    if action in ("dset", "rset"):
+        await state.clear()
+        minutes = callback_data.value
+        value = None if minutes == OFF_VALUE else time(minutes // 60 % 24, minutes % 60)
+        if action == "dset":
+            company.digest_time = value
+        else:
+            company.reminder_time = value
 
     if action == "days":
         await call.message.edit_text(
@@ -156,6 +186,8 @@ async def on_settings_action(
 
     if action == "tzset" and 0 <= callback_data.value < len(TIMEZONES):
         company.timezone = TIMEZONES[callback_data.value][1]
+    if action == "card":
+        await state.clear()
 
     await call.message.edit_text(settings_text(company), reply_markup=settings_keyboard())
 
