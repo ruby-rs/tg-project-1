@@ -15,13 +15,15 @@ from app.bot.commands import sync_user_commands
 from app.bot.filters import IsManager
 from app.bot.handlers.start import SITE_INVITE_PREFIX
 from app.bot.keyboards import (
+    Nav,
     NewSite,
     SiteAdmin,
     TeamAdmin,
     cancel_keyboard,
-    invite_keyboard,
     main_menu,
+    with_menu,
 )
+from app.bot.screens import ask, reply_to_input, show
 from app.bot.states import SiteEdit
 from app.db.models import Site, User, UserRole
 from app.db.repositories import SiteRepo, UserRepo
@@ -48,9 +50,7 @@ async def _notify(bot: Bot, user: User, text: str, markup=None) -> None:
 
 
 async def _edit_or_answer(call: CallbackQuery, text: str, markup: InlineKeyboardMarkup) -> None:
-    await call.answer()
-    if call.message:
-        await call.message.edit_text(text, reply_markup=markup)
+    await show(call, text, markup)
 
 
 # ---------- Объекты ----------
@@ -67,7 +67,7 @@ def _sites_list_markup(sites: list[Site]) -> InlineKeyboardMarkup:
         )
     kb.button(text="➕ Новый объект", callback_data=NewSite())
     kb.adjust(1)
-    return kb.as_markup()
+    return with_menu(kb.as_markup())
 
 
 async def _site_card(session: AsyncSession, site: Site) -> tuple[str, InlineKeyboardMarkup]:
@@ -96,20 +96,24 @@ async def _site_card(session: AsyncSession, site: Site) -> tuple[str, InlineKeyb
         kb.button(text="♻️ Открыть снова", callback_data=SiteAdmin(action="open", site_id=sid))
     kb.button(text="← Все объекты", callback_data=SiteAdmin(action="list"))
     kb.adjust(2, 1, 1, 1, 1)
-    return "\n".join(lines), kb.as_markup()
+    return "\n".join(lines), with_menu(kb.as_markup())
+
+
+async def sites_screen(user: User, session: AsyncSession) -> tuple[str, InlineKeyboardMarkup]:
+    sites = await SiteRepo(session).list_all(user.company_id)
+    text = "🏗 Управление объектами:" if sites else "Объектов пока нет. Добавьте первый:"
+    return text, _sites_list_markup(sites)
 
 
 @router.message(Command("sites"))
 async def cmd_sites(message: Message, user: User, session: AsyncSession) -> None:
-    sites = await SiteRepo(session).list_all(user.company_id)
-    text = "Управление объектами:" if sites else "Объектов пока нет. Добавьте первый:"
-    await message.answer(text, reply_markup=_sites_list_markup(sites))
+    text, markup = await sites_screen(user, session)
+    await message.answer(text, reply_markup=markup)
 
 
 @router.callback_query(SiteAdmin.filter(F.action == "list"))
 async def on_sites_list(call: CallbackQuery, user: User, session: AsyncSession) -> None:
-    sites = await SiteRepo(session).list_all(user.company_id)
-    await _edit_or_answer(call, "Управление объектами:", _sites_list_markup(sites))
+    await show(call, *await sites_screen(user, session))
 
 
 @router.callback_query(SiteAdmin.filter())
@@ -131,23 +135,23 @@ async def on_site_action(
     if action in ("rename", "address"):
         await state.set_state(SiteEdit.name if action == "rename" else SiteEdit.address)
         await state.update_data(site_id=site.id)
-        await call.answer()
         prompt = (
-            "Напишите новое название объекта:"
+            f"✏️ Напишите новое название объекта «{escape(site.name)}»:"
             if action == "rename"
-            else "Напишите адрес объекта (или «-», чтобы удалить):"
+            else f"📍 Напишите адрес объекта «{escape(site.name)}» (или «-», чтобы удалить):"
         )
-        if call.message:
-            await call.message.answer(prompt, reply_markup=cancel_keyboard())
+        await ask(call, state, prompt, cancel_keyboard())
         return
 
     if action == "invite":
         link = await create_start_link(bot, SITE_INVITE_PREFIX + site.invite_code)
-        await call.answer()
-        if call.message:
-            await call.message.answer(
-                f"Ссылка на объект «{escape(site.name)}» — перешлите её прорабу:\n\n{link}"
-            )
+        kb = InlineKeyboardBuilder()
+        kb.button(text="← К объекту", callback_data=SiteAdmin(action="card", site_id=site.id))
+        await show(
+            call,
+            f"🔗 Ссылка на объект «{escape(site.name)}» — перешлите её прорабу:\n\n{link}",
+            with_menu(kb.as_markup()),
+        )
         return
 
     if action == "members":
@@ -182,25 +186,34 @@ async def on_site_rename(
     message: Message, user: User, session: AsyncSession, state: FSMContext
 ) -> None:
     name = message.text.strip()
+    data = await state.get_data()
     if not 2 <= len(name) <= 255:
-        await message.answer("Название должно быть от 2 до 255 символов. Попробуйте ещё раз.")
+        await reply_to_input(
+            message,
+            data,
+            "Название должно быть от 2 до 255 символов. Напишите ещё раз.",
+            cancel_keyboard(),
+        )
         return
     repo = SiteRepo(session)
-    site = await repo.get_in_company(user.company_id, (await state.get_data()).get("site_id", 0))
+    site = await repo.get_in_company(user.company_id, data.get("site_id", 0))
     if site is None:
         await state.clear()
-        await message.answer("Объект не найден.")
+        await reply_to_input(message, data, "Объект не найден.", with_menu())
         return
     duplicate = await repo.get_by_name(user.company_id, name)
     if duplicate is not None and duplicate.id != site.id:
-        await message.answer(
-            "Объект с таким названием уже есть. Введите другое.", reply_markup=cancel_keyboard()
+        await reply_to_input(
+            message,
+            data,
+            "Объект с таким названием уже есть. Напишите другое.",
+            cancel_keyboard(),
         )
         return
     site.name = name
     await state.clear()
     text, markup = await _site_card(session, site)
-    await message.answer("✅ Название изменено.\n\n" + text, reply_markup=markup)
+    await reply_to_input(message, data, "✅ Название изменено.\n\n" + text, markup)
 
 
 @router.message(SiteEdit.address, F.text & ~F.text.startswith("/"))
@@ -208,16 +221,15 @@ async def on_site_address(
     message: Message, user: User, session: AsyncSession, state: FSMContext
 ) -> None:
     address = message.text.strip()
-    site = await SiteRepo(session).get_in_company(
-        user.company_id, (await state.get_data()).get("site_id", 0)
-    )
+    data = await state.get_data()
+    site = await SiteRepo(session).get_in_company(user.company_id, data.get("site_id", 0))
     await state.clear()
     if site is None:
-        await message.answer("Объект не найден.")
+        await reply_to_input(message, data, "Объект не найден.", with_menu())
         return
     site.address = None if address in ("-", "—") else address[:500]
     text, markup = await _site_card(session, site)
-    await message.answer("✅ Адрес сохранён.\n\n" + text, reply_markup=markup)
+    await reply_to_input(message, data, "✅ Адрес сохранён.\n\n" + text, markup)
 
 
 # ---------- Команда ----------
@@ -230,9 +242,9 @@ def _team_list_markup(users: list[User]) -> InlineKeyboardMarkup:
             text=f"{ROLE_ICONS.get(u.role, '')} {u.full_name} — {ROLE_TITLES.get(u.role, u.role)}",
             callback_data=TeamAdmin(action="card", user_id=u.id),
         )
-    kb.button(text="🔗 Пригласить прораба", callback_data=TeamAdmin(action="invite"))
+    kb.button(text="🔗 Пригласить прораба", callback_data=Nav(to="invite"))
     kb.adjust(1)
-    return kb.as_markup()
+    return with_menu(kb.as_markup())
 
 
 TEAM_TITLE = "👥 Команда компании:"
@@ -279,27 +291,20 @@ async def _member_card(
     return "\n".join(lines), kb.as_markup()
 
 
+async def team_screen(user: User, session: AsyncSession) -> tuple[str, InlineKeyboardMarkup]:
+    users = await UserRepo(session).list_company(user.company_id)
+    return TEAM_TITLE, _team_list_markup(users)
+
+
 @router.message(Command("team"))
 async def cmd_team(message: Message, user: User, session: AsyncSession) -> None:
-    users = await UserRepo(session).list_company(user.company_id)
-    await message.answer(TEAM_TITLE, reply_markup=_team_list_markup(users))
+    text, markup = await team_screen(user, session)
+    await message.answer(text, reply_markup=markup)
 
 
 @router.callback_query(TeamAdmin.filter(F.action == "list"))
 async def on_team_list(call: CallbackQuery, user: User, session: AsyncSession) -> None:
-    users = await UserRepo(session).list_company(user.company_id)
-    await _edit_or_answer(call, TEAM_TITLE, _team_list_markup(users))
-
-
-@router.callback_query(TeamAdmin.filter(F.action == "invite"))
-async def on_team_invite(call: CallbackQuery, user: User, session: AsyncSession) -> None:
-    sites = await SiteRepo(session).list_for_user(user)
-    await call.answer()
-    if call.message:
-        await call.message.answer(
-            "Куда пригласить прораба? Ссылка на объект сразу даёт доступ к нему.",
-            reply_markup=invite_keyboard(sites),
-        )
+    await show(call, *await team_screen(user, session))
 
 
 @router.callback_query(TeamAdmin.filter())

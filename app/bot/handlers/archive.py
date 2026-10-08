@@ -3,14 +3,16 @@
 from datetime import date, timedelta
 from html import escape
 
-from aiogram import Bot, Router
+from aiogram import Router
 from aiogram.filters import Command
 from aiogram.filters.callback_data import CallbackData
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.filters import HasCompany
+from app.bot.keyboards import with_menu
+from app.bot.screens import show
 from app.config import Settings
 from app.db.models import Site, User
 from app.db.repositories import ExportJobRepo, SiteRepo
@@ -57,46 +59,52 @@ def periods_keyboard(site_id: int) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-@router.message(Command("archive"))
-async def cmd_archive(message: Message, user: User, session: AsyncSession) -> None:
+def _periods_screen(site: Site, can_switch: bool) -> tuple[str, InlineKeyboardMarkup]:
+    kb = InlineKeyboardBuilder.from_markup(periods_keyboard(site.id))
+    if can_switch:
+        other = ArchiveSite(site_id=0).pack()
+        kb.row(InlineKeyboardButton(text="🏗 Другой объект", callback_data=other))
+    return f"🗂 Архив «{escape(site.name)}» — за какой период?", with_menu(kb.as_markup())
+
+
+async def archive_screen(user: User, session: AsyncSession) -> tuple[str, InlineKeyboardMarkup]:
     sites = await SiteRepo(session).list_for_user(user)
     if not sites:
-        await message.answer("Объектов пока нет.")
-        return
+        return "Объектов пока нет.", with_menu()
     if len(sites) == 1:
-        await message.answer(
-            f"Архив «{escape(sites[0].name)}» — за какой период?",
-            reply_markup=periods_keyboard(sites[0].id),
-        )
-        return
+        return _periods_screen(sites[0], can_switch=False)
     kb = InlineKeyboardBuilder()
     for site in sites:
-        kb.button(text=site.name, callback_data=ArchiveSite(site_id=site.id))
+        kb.button(text=f"🏗 {site.name}", callback_data=ArchiveSite(site_id=site.id))
     kb.adjust(1)
-    await message.answer("Архив какого объекта выгрузить?", reply_markup=kb.as_markup())
+    return "🗂 Архив какого объекта выгрузить?", with_menu(kb.as_markup())
+
+
+@router.message(Command("archive"))
+async def cmd_archive(message: Message, user: User, session: AsyncSession) -> None:
+    text, markup = await archive_screen(user, session)
+    await message.answer(text, reply_markup=markup)
 
 
 @router.callback_query(ArchiveSite.filter())
 async def on_archive_site(
     call: CallbackQuery, callback_data: ArchiveSite, user: User, session: AsyncSession
 ) -> None:
+    if callback_data.site_id == 0:
+        text, markup = await archive_screen(user, session)
+        await show(call, text, markup)
+        return
     site = await SiteRepo(session).get_for_user(user, callback_data.site_id)
     if site is None:
         await call.answer("Объект не найден", show_alert=True)
         return
-    await call.answer()
-    if call.message:
-        await call.message.edit_text(
-            f"Архив «{escape(site.name)}» — за какой период?",
-            reply_markup=periods_keyboard(site.id),
-        )
+    await show(call, *_periods_screen(site, can_switch=True))
 
 
 @router.callback_query(ArchivePeriod.filter())
 async def on_archive_period(
     call: CallbackQuery,
     callback_data: ArchivePeriod,
-    bot: Bot,
     user: User,
     session: AsyncSession,
     settings: Settings,
@@ -110,19 +118,16 @@ async def on_archive_period(
     date_from, date_to = period_dates(callback_data.period, today, site, tz)
     chat_id = call.message.chat.id if call.message else call.from_user.id
     created = await ExportJobRepo(session).enqueue(site.id, date_from, date_to, chat_id, user.id)
-    await call.answer()
     if not created:
-        await bot.send_message(
-            chat_id, f"⏳ Архив «{escape(site.name)}» уже собирается — пришлю, как будет готов."
+        text = f"⏳ Архив «{escape(site.name)}» уже собирается — пришлю, как будет готов."
+    else:
+        period = (
+            f"{date_from:%d.%m.%Y}"
+            if date_from == date_to
+            else f"{date_from:%d.%m.%Y}–{date_to:%d.%m.%Y}"
         )
-        return
-    period = (
-        f"{date_from:%d.%m.%Y}"
-        if date_from == date_to
-        else f"{date_from:%d.%m.%Y}–{date_to:%d.%m.%Y}"
-    )
-    await bot.send_message(
-        chat_id,
-        f"⏳ Собираю архив «{escape(site.name)}» за {period}. Пришлю сюда файлом: "
-        "фото, видео и голосовые по дням, реестр сообщений и контрольные суммы.",
-    )
+        text = (
+            f"⏳ Собираю архив «{escape(site.name)}» за {period}. Пришлю сюда файлом: "
+            "фото, видео и голосовые по дням, реестр сообщений и контрольные суммы."
+        )
+    await show(call, text, with_menu())

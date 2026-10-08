@@ -12,6 +12,7 @@ from aiogram import Bot
 from aiogram.client.session.base import BaseSession
 from aiogram.methods import (
     AnswerCallbackQuery,
+    DeleteMessage,
     DeleteMyCommands,
     EditMessageReplyMarkup,
     EditMessageText,
@@ -88,7 +89,8 @@ class MockedSession(BaseSession):
             | SendChatAction
             | AnswerCallbackQuery
             | SetMyCommands
-            | DeleteMyCommands,
+            | DeleteMyCommands
+            | DeleteMessage,
         ):
             return True
         if isinstance(method, EditMessageText | EditMessageReplyMarkup):

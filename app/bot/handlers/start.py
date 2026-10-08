@@ -3,7 +3,7 @@ from html import escape
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, ReplyKeyboardRemove
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.deep_linking import create_start_link
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,11 +15,15 @@ from app.bot.keyboards import (
     ConsentAction,
     InviteLink,
     Menu,
+    Nav,
     NewSite,
+    home_text,
     invite_keyboard,
     main_menu,
     sites_keyboard,
+    with_menu,
 )
+from app.bot.screens import PROMPT_KEY, drop_reply_keyboard, reply_to_input, show
 from app.bot.states import Registration
 from app.config import Settings
 from app.db.models import Company, User, UserRole
@@ -34,7 +38,7 @@ BAD_INVITE = "Ссылка-приглашение недействительна
 _HELP_INTRO = """\
 <b>Как пользоваться</b>
 
-Всё делается кнопками меню под полем ввода — команды набирать не нужно.
+Команда одна — /menu, дальше всё кнопками.
 
 1. «📍 Объект» — выберите объект, все сообщения будут привязаны к нему.
 2. В течение дня присылайте сюда всё с объекта: фото, видео, голосовые, текст.
@@ -114,10 +118,12 @@ async def process_start(
         await session.flush()
         await sites.add_member(site.id, user.id)
         text = await set_current_site(session, user, site)
+        await drop_reply_keyboard(bot, chat_id)
         await bot.send_message(
             chat_id,
             f"👷 Вы подключены к компании «{escape(site.company.name)}».\n{text}\n\n"
-            "Присылайте сюда фото, голосовые и текст с объекта. Меню — кнопками внизу.",
+            "Присылайте сюда фото, голосовые и текст с объекта. Меню всегда можно "
+            "открыть командой /menu.",
             reply_markup=main_menu(user),
         )
         return
@@ -132,13 +138,13 @@ async def process_start(
         await session.flush()
         my_sites = await sites.list_for_user(user)
         text = f"👷 Вы подключены к компании «{escape(company.name)}»."
+        await drop_reply_keyboard(bot, chat_id)
         if my_sites:
-            await bot.send_message(chat_id, text, reply_markup=main_menu(user))
             await bot.send_message(
                 chat_id,
-                "Выберите объект, на котором вы сегодня работаете:",
-                reply_markup=sites_keyboard(
-                    my_sites, user.current_site_id, can_create=user.is_manager
+                f"{text}\n\nВыберите объект, на котором вы сегодня работаете:",
+                reply_markup=with_menu(
+                    sites_keyboard(my_sites, user.current_site_id, can_create=user.is_manager)
                 ),
             )
         else:
@@ -148,21 +154,25 @@ async def process_start(
         return
 
     if user.company_id is not None:
-        await bot.send_message(chat_id, help_text(user), reply_markup=main_menu(user))
+        await drop_reply_keyboard(bot, chat_id)
+        await bot.send_message(chat_id, home_text(user), reply_markup=main_menu(user))
         return
 
     await state.set_state(Registration.company_name)
-    await bot.send_message(
+    await drop_reply_keyboard(bot, chat_id)
+    sent = await bot.send_message(
         chat_id,
         "Здравствуйте! Я собираю отчёты прорабов с объектов: фото, голосовые и текст "
         "превращаю в структурированный дневной отчёт.\n\n"
         "Если вы <b>руководитель</b> — напишите название компании, и я её зарегистрирую.\n"
         "Если вы <b>прораб</b> — попросите у руководителя ссылку-приглашение.",
-        reply_markup=ReplyKeyboardRemove(),
     )
+    await state.update_data({PROMPT_KEY: sent.message_id})
 
 
-@router.message(Registration.company_name, F.text & ~F.text.startswith("/") & ~F.text.in_(Menu.ALL))
+@router.message(
+    Registration.company_name, F.text & ~F.text.startswith("/") & ~F.text.in_(Menu.LEGACY)
+)
 async def register_company(
     message: Message,
     bot: Bot,
@@ -175,30 +185,36 @@ async def register_company(
     if not 2 <= len(name) <= 255:
         await message.answer("Название должно быть от 2 до 255 символов. Попробуйте ещё раз.")
         return
+    data = await state.get_data()
     company = await CompanyRepo(session).create(name, settings.default_timezone, user)
     await state.clear()
     await sync_user_commands(bot, user)
-    await message.answer(
-        f"🏗 Компания «{escape(company.name)}» создана, вы — руководитель.\n\n"
-        "Дальше:\n"
-        "1. Добавьте объекты — кнопка ниже или «🏗 Объекты» в меню\n"
-        "2. «🔗 Пригласить» — отправьте ссылку прорабам\n\n"
-        "Вы тоже можете присылать сюда фото и голосовые с объектов.",
-        reply_markup=main_menu(user),
-    )
     kb = InlineKeyboardBuilder()
-    kb.button(text="➕ Добавить объект", callback_data=NewSite())
-    await message.answer("Начнём с первого объекта:", reply_markup=kb.as_markup())
+    kb.button(text="➕ Добавить первый объект", callback_data=NewSite())
+    await reply_to_input(
+        message,
+        data,
+        f"🏗 Компания «{escape(company.name)}» создана, вы — руководитель.\n\n"
+        "Дальше: добавьте объекты и отправьте прорабам ссылку из «🔗 Пригласить». "
+        "Вы тоже можете присылать сюда фото и голосовые с объектов.\n"
+        "Меню всегда открывается командой /menu.",
+        with_menu(kb.as_markup()),
+    )
+
+
+async def invite_screen(user: User, session: AsyncSession) -> tuple[str, InlineKeyboardMarkup]:
+    sites = await SiteRepo(session).list_for_user(user)
+    return (
+        "🔗 Куда пригласить прораба? Ссылка на объект сразу даёт доступ к нему; "
+        "уже подключённому прорабу её можно прислать, чтобы добавить ещё объект.",
+        with_menu(invite_keyboard(sites)),
+    )
 
 
 @router.message(Command("invite"), IsManager())
 async def cmd_invite(message: Message, user: User, session: AsyncSession) -> None:
-    sites = await SiteRepo(session).list_for_user(user)
-    await message.answer(
-        "Куда пригласить прораба? Ссылка на объект сразу даёт доступ к нему; "
-        "уже подключённому прорабу её можно прислать, чтобы добавить ещё объект.",
-        reply_markup=invite_keyboard(sites),
-    )
+    text, markup = await invite_screen(user, session)
+    await message.answer(text, reply_markup=markup)
 
 
 @router.callback_query(InviteLink.filter(), IsManager())
@@ -214,20 +230,25 @@ async def on_invite_link(
             return
         payload, target = SITE_INVITE_PREFIX + site.invite_code, f"на объект «{escape(site.name)}»"
     link = await create_start_link(bot, payload)
-    await call.answer()
-    if call.message:
-        await call.message.answer(f"Ссылка-приглашение {target} — перешлите её прорабу:\n\n{link}")
+    kb = InlineKeyboardBuilder()
+    kb.button(text="← Другая ссылка", callback_data=Nav(to="invite"))
+    await show(
+        call,
+        f"🔗 Ссылка-приглашение {target} — перешлите её прорабу:\n\n{link}",
+        with_menu(kb.as_markup()),
+    )
 
 
-def help_keyboard() -> InlineKeyboardMarkup:
+def help_screen(user: User) -> tuple[str, InlineKeyboardMarkup]:
     kb = InlineKeyboardBuilder()
     kb.button(text="🔒 Персональные данные", callback_data=ConsentAction(action="privacy"))
-    return kb.as_markup()
+    return help_text(user), with_menu(kb.as_markup())
 
 
 @router.message(Command("help"))
 async def cmd_help(message: Message, user: User) -> None:
-    await message.answer(help_text(user), reply_markup=help_keyboard())
+    text, markup = help_screen(user)
+    await message.answer(text, reply_markup=markup)
 
 
 @router.message(Command("cancel"))
@@ -236,4 +257,4 @@ async def cmd_cancel(message: Message, user: User, state: FSMContext) -> None:
     if user.company_id is None:
         await message.answer("Отменено.")
     else:
-        await message.answer("Отменено.", reply_markup=main_menu(user))
+        await message.answer(home_text(user), reply_markup=main_menu(user))

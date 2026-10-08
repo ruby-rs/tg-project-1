@@ -1,15 +1,22 @@
 from collections.abc import Sequence
 from datetime import date
+from html import escape
 
 from aiogram.filters.callback_data import CallbackData
-from aiogram.types import InlineKeyboardMarkup, ReplyKeyboardMarkup
-from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.db.models import Site, User
 
 
+class Nav(CallbackData, prefix="m"):
+    """Переход между разделами меню — в том же сообщении, без новых."""
+
+    to: str  # home | report | site | archive | help | stats | sites | team | invite | settings
+
+
 class Menu:
-    """Кнопки главного меню под полем ввода — всё основное без команд."""
+    """Подписи разделов главного меню."""
 
     REPORT = "📋 Отчёт"
     SITE = "📍 Объект"
@@ -21,36 +28,62 @@ class Menu:
     INVITE = "🔗 Пригласить"
     SETTINGS = "⚙️ Настройки"
 
-    FOREMAN = (REPORT, SITE, ARCHIVE, HELP)
-    MANAGER_ONLY = (STATS, SITES, TEAM, INVITE, SETTINGS)
-    ALL = FOREMAN + MANAGER_ONLY
+    # Кнопки прежнего меню под полем ввода — у кого оно осталось, нажатие откроет новое
+    LEGACY = (REPORT, SITE, ARCHIVE, HELP, STATS, SITES, TEAM, INVITE, SETTINGS)
 
 
-def main_menu(user: User) -> ReplyKeyboardMarkup:
-    kb = ReplyKeyboardBuilder()
+_FOREMAN_ITEMS = [
+    (Menu.REPORT, "report"),
+    (Menu.SITE, "site"),
+    (Menu.ARCHIVE, "archive"),
+    (Menu.HELP, "help"),
+]
+_MANAGER_ITEMS = [
+    (Menu.REPORT, "report"),
+    (Menu.STATS, "stats"),
+    (Menu.SITES, "sites"),
+    (Menu.TEAM, "team"),
+    (Menu.INVITE, "invite"),
+    (Menu.SETTINGS, "settings"),
+    (Menu.ARCHIVE, "archive"),
+    (Menu.SITE, "site"),
+    (Menu.HELP, "help"),
+]
+MANAGER_SECTIONS = frozenset({"stats", "sites", "team", "invite", "settings"})
+
+
+def main_menu(user: User) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    items = _MANAGER_ITEMS if user.is_manager else _FOREMAN_ITEMS
+    for text, to in items:
+        kb.button(text=text, callback_data=Nav(to=to))
     if user.is_manager:
-        for text in (
-            Menu.REPORT,
-            Menu.STATS,
-            Menu.SITES,
-            Menu.TEAM,
-            Menu.INVITE,
-            Menu.SETTINGS,
-            Menu.ARCHIVE,
-            Menu.SITE,
-            Menu.HELP,
-        ):
-            kb.button(text=text)
         kb.adjust(2, 2, 2, 3)
     else:
-        for text in Menu.FOREMAN:
-            kb.button(text=text)
         kb.adjust(2, 2)
-    return kb.as_markup(
-        resize_keyboard=True,
-        is_persistent=True,
-        input_field_placeholder="Фото, голосовое или текст с объекта",
-    )
+    return kb.as_markup()
+
+
+def home_text(user: User) -> str:
+    lines = ["☰ <b>Меню</b>"]
+    if user.current_site is not None:
+        lines.append(f"📍 Текущий объект: {escape(user.current_site.name)}")
+    lines.append("\nФото, голосовые и текст с объекта просто присылайте в чат.")
+    return "\n".join(lines)
+
+
+BACK_TO_MENU = "← Меню"
+
+
+def menu_button(kb: InlineKeyboardBuilder) -> InlineKeyboardBuilder:
+    """Добавляет отдельной строкой кнопку возврата в главное меню."""
+    kb.row(InlineKeyboardButton(text=BACK_TO_MENU, callback_data=Nav(to="home").pack()))
+    return kb
+
+
+def with_menu(markup: InlineKeyboardMarkup | None = None) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder.from_markup(markup) if markup else InlineKeyboardBuilder()
+    return menu_button(kb).as_markup()
 
 
 class SiteAdmin(CallbackData, prefix="sa"):
@@ -69,12 +102,15 @@ class ConsentAction(CallbackData, prefix="consent"):
 
 
 class Cancel(CallbackData, prefix="cancel"):
-    """Отмена текущего ввода (вместо /cancel)."""
+    """Отмена текущего ввода: сообщение с вопросом снова становится меню
+    (drop — удаляется, если вопрос задан отдельным сообщением, например под отчётом)."""
+
+    drop: bool = False
 
 
-def cancel_keyboard(text: str = "✖️ Отмена") -> InlineKeyboardMarkup:
+def cancel_keyboard(text: str = "✖️ Отмена", *, drop: bool = False) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text=text, callback_data=Cancel())
+    kb.button(text=text, callback_data=Cancel(drop=drop))
     return kb.as_markup()
 
 

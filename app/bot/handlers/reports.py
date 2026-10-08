@@ -2,11 +2,11 @@
 
 from collections import Counter
 from datetime import date, timedelta
-from html import escape
+from html import escape, unescape
 
 from aiogram import Bot, Router
 from aiogram.filters import Command, CommandObject
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.filters import HasCompany
@@ -18,11 +18,12 @@ from app.bot.keyboards import (
     ReportSite,
     ReportView,
     feedback_keyboard,
-    main_menu,
     report_days_keyboard,
     report_pick_site_keyboard,
     report_sites_keyboard,
+    with_menu,
 )
+from app.bot.screens import show
 from app.config import Settings
 from app.db.models import Site, User
 from app.db.repositories import EntryRepo, ReportJobRepo, ReportRepo, SiteRepo
@@ -50,22 +51,20 @@ def parse_days_ago(args: str | None) -> int:
 
 
 async def request_report(
-    bot: Bot,
     chat_id: int,
     site: Site,
     days_ago: int,
     user: User,
     session: AsyncSession,
     settings: Settings,
-) -> None:
+) -> str:
     work_date = today_for(user.company.timezone, settings.work_day_start_hour) - timedelta(
         days=days_ago
     )
-    await enqueue_report(bot, chat_id, site, work_date, user, session)
+    return await enqueue_report(chat_id, site, work_date, user, session)
 
 
 async def enqueue_report(
-    bot: Bot,
     chat_id: int,
     site: Site,
     work_date: date,
@@ -73,7 +72,8 @@ async def enqueue_report(
     session: AsyncSession,
     *,
     rebuild: bool = False,
-) -> None:
+) -> str:
+    """Ставит отчёт в очередь воркеру. Возвращает текст для пользователя."""
     created = await ReportJobRepo(session).enqueue(
         site.id, work_date, chat_id, user.id, rebuild=rebuild
     )
@@ -84,8 +84,7 @@ async def enqueue_report(
         text = f"🔄 Пересобираю отчёт {what}. Пришлю сюда, как будет готов."
     else:
         text = f"⏳ Формирую отчёт {what}. Пришлю сюда, как будет готов."
-    # Заодно обновляем меню под полем ввода (у старых пользователей его могло не быть)
-    await bot.send_message(chat_id, text, reply_markup=main_menu(user))
+    return text
 
 
 PICK_SITE_PROMPT = "📋 По какому объекту отчёт?"
@@ -95,24 +94,17 @@ def _days_prompt(site: Site) -> str:
     return f"📋 Отчёт по «{escape(site.name)}» — за какой день?"
 
 
-async def show_report_menu(message: Message, user: User, session: AsyncSession) -> None:
-    """Кнопка «📋 Отчёт»: объект (если их несколько) → день → отчёт."""
-    repo = SiteRepo(session)
-    sites = await repo.list_for_user(user)
+async def report_screen(user: User, session: AsyncSession) -> tuple[str, InlineKeyboardMarkup]:
+    """Раздел «📋 Отчёт»: объект (если их несколько) → день → отчёт."""
+    sites = await SiteRepo(session).list_for_user(user)
     if not sites:
-        await message.answer(no_sites_text(user))
-        return
+        return no_sites_text(user), with_menu()
     current = next((s for s in sites if s.id == user.current_site_id), None)
     if len(sites) == 1 or (current is not None and not user.is_manager):
         site = current or sites[0]
-        await message.answer(
-            _days_prompt(site),
-            reply_markup=report_days_keyboard(site.id, can_switch=len(sites) > 1),
-        )
-        return
-    await message.answer(
-        "📋 По какому объекту отчёт?", reply_markup=report_pick_site_keyboard(sites)
-    )
+        markup = report_days_keyboard(site.id, can_switch=len(sites) > 1)
+        return _days_prompt(site), with_menu(markup)
+    return PICK_SITE_PROMPT, with_menu(report_pick_site_keyboard(sites))
 
 
 @router.callback_query(ReportMenu.filter())
@@ -120,23 +112,17 @@ async def on_report_menu(
     call: CallbackQuery, callback_data: ReportMenu, user: User, session: AsyncSession
 ) -> None:
     repo = SiteRepo(session)
-    await call.answer()
-    if call.message is None:
-        return
     if callback_data.site_id == 0:
         sites = await repo.list_for_user(user)
-        await call.message.edit_text(
-            PICK_SITE_PROMPT, reply_markup=report_pick_site_keyboard(sites)
-        )
+        await show(call, PICK_SITE_PROMPT, with_menu(report_pick_site_keyboard(sites)))
         return
     site = await repo.get_for_user(user, callback_data.site_id)
     if site is None:
-        await call.message.edit_text("Объект не найден.")
+        await show(call, "Объект не найден.", with_menu())
         return
     can_switch = len(await repo.list_for_user(user)) > 1
-    await call.message.edit_text(
-        _days_prompt(site), reply_markup=report_days_keyboard(site.id, can_switch=can_switch)
-    )
+    markup = report_days_keyboard(site.id, can_switch=can_switch)
+    await show(call, _days_prompt(site), with_menu(markup))
 
 
 @router.message(Command("report"))
@@ -152,14 +138,16 @@ async def cmd_report(
     repo = SiteRepo(session)
     current = await repo.get_for_user(user, user.current_site_id) if user.current_site_id else None
     if current is not None and not user.is_manager:
-        await request_report(bot, message.chat.id, current, days_ago, user, session, settings)
+        text = await request_report(message.chat.id, current, days_ago, user, session, settings)
+        await message.answer(text)
         return
 
     sites = await repo.list_for_user(user)
     if not sites:
         await message.answer(no_sites_text(user))
     elif len(sites) == 1:
-        await request_report(bot, message.chat.id, sites[0], days_ago, user, session, settings)
+        text = await request_report(message.chat.id, sites[0], days_ago, user, session, settings)
+        await message.answer(text)
     else:
         await message.answer(
             "По какому объекту отчёт?", reply_markup=report_sites_keyboard(sites, days_ago)
@@ -179,9 +167,9 @@ async def on_report_site(
     if site is None:
         await call.answer("Объект не найден", show_alert=True)
         return
-    await call.answer()
     chat_id = call.message.chat.id if call.message else call.from_user.id
-    await request_report(bot, chat_id, site, callback_data.days_ago, user, session, settings)
+    text = await request_report(chat_id, site, callback_data.days_ago, user, session, settings)
+    await show(call, text, with_menu())
 
 
 @router.callback_query(ReportView.filter())
@@ -240,7 +228,8 @@ async def on_report_rebuild(
     if site is None:
         await call.answer("Объект не найден", show_alert=True)
         return
-    await call.answer()
     chat_id = call.message.chat.id if call.message else call.from_user.id
     work_date = date.fromordinal(callback_data.day)
-    await enqueue_report(bot, chat_id, site, work_date, user, session, rebuild=True)
+    # Отчёт остаётся в чате как есть; о пересборке — всплывающим уведомлением
+    text = await enqueue_report(chat_id, site, work_date, user, session, rebuild=True)
+    await call.answer(unescape(text))

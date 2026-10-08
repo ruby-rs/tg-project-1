@@ -110,29 +110,31 @@ async def test_foreman_has_no_admin_commands(sessionmaker, settings, bot, tg):
     assert "Не знаю такой команды" in tg.sent_texts()[-1]
 
 
-async def test_command_menu_follows_role(sessionmaker, settings, bot, tg):
-    from aiogram.methods import DeleteMyCommands, SetMyCommands
+async def test_role_change_sends_matching_menu(sessionmaker, settings, bot, tg):
+    from aiogram.methods import SendMessage, SetMyCommands
+
+    from app.bot.keyboards import Menu
 
     dp = build_dispatcher(settings, sessionmaker)
     await register_owner_with_site(dp, bot)
-    owner_menu = [r for r in tg.requests if isinstance(r, SetMyCommands)]
-    assert owner_menu and owner_menu[-1].scope.chat_id == TG_USER_ID
-    assert "team" in [c.command for c in owner_menu[-1].commands]
-
     await join_foreman_to_site(dp, bot, sessionmaker)
     async with sessionmaker() as s:
         foreman = await s.scalar(select(User).where(User.tg_id == FOREMAN_ID))
+
+    def foreman_menu() -> list[str]:
+        [note] = [r for r in tg.requests if isinstance(r, SendMessage) and r.chat_id == FOREMAN_ID]
+        return [b.text for row in note.reply_markup.inline_keyboard for b in row]
 
     tg.requests.clear()
     await dp.feed_update(
         bot, callback_update(TeamAdmin(action="promote", user_id=foreman.id).pack())
     )
-    [menu] = [r for r in tg.requests if isinstance(r, SetMyCommands)]
-    assert menu.scope.chat_id == FOREMAN_ID
+    assert Menu.STATS in foreman_menu()
+    # Список команд в Telegram у всех один — только /menu
+    assert not [r for r in tg.requests if isinstance(r, SetMyCommands)]
 
     tg.requests.clear()
     await dp.feed_update(
         bot, callback_update(TeamAdmin(action="demote", user_id=foreman.id).pack())
     )
-    [reset] = [r for r in tg.requests if isinstance(r, DeleteMyCommands)]
-    assert reset.scope.chat_id == FOREMAN_ID
+    assert Menu.STATS not in foreman_menu()

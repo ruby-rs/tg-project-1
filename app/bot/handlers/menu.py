@@ -1,20 +1,20 @@
-"""Главное меню под полем ввода: кнопки вместо команд.
+"""Главное меню: команда /menu и переходы по разделам кнопками в одном сообщении.
 
-Роутер стоит сразу после согласия — раньше диалогов, ждущих ввод текста: нажатие
-кнопки меню прерывает начатый диалог (например, переименование объекта), а не
-попадает в него как ответ. И раньше приёма сообщений — текст кнопки не сохраняется
-как сообщение с объекта.
+Роутер стоит сразу после согласия — раньше диалогов, ждущих ввод текста: /menu и
+кнопки меню прерывают начатый диалог (например, переименование объекта), а не
+попадают в него как ответ.
 """
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.filters import HasCompany, IsManager
-from app.bot.handlers import admin, archive, feedback, settings, sites, start
-from app.bot.handlers.reports import show_report_menu
-from app.bot.keyboards import Cancel, Menu, main_menu
+from app.bot.filters import HasCompany
+from app.bot.handlers import admin, archive, feedback, reports, settings, sites, start
+from app.bot.keyboards import MANAGER_SECTIONS, Cancel, Menu, Nav, home_text, main_menu
+from app.bot.screens import delete_quietly, drop_reply_keyboard, show
 from app.config import Settings
 from app.db.models import User
 
@@ -23,83 +23,78 @@ router.message.filter(HasCompany())
 router.callback_query.filter(HasCompany())
 
 
-@router.message(F.text == Menu.REPORT)
-async def menu_report(
-    message: Message, user: User, session: AsyncSession, state: FSMContext
+def home_screen(user: User) -> tuple[str, InlineKeyboardMarkup]:
+    return home_text(user), main_menu(user)
+
+
+async def render(
+    to: str, user: User, session: AsyncSession, cfg: Settings
+) -> tuple[str, InlineKeyboardMarkup | None]:
+    if to in MANAGER_SECTIONS and not user.is_manager:
+        return "Этот раздел доступен только руководителю.\n\n" + home_text(user), main_menu(user)
+    match to:
+        case "report":
+            return await reports.report_screen(user, session)
+        case "site":
+            return await sites.object_screen(user, session)
+        case "archive":
+            return await archive.archive_screen(user, session)
+        case "help":
+            return start.help_screen(user)
+        case "stats":
+            return await feedback.stats_screen(user, session, cfg)
+        case "sites":
+            return await admin.sites_screen(user, session)
+        case "team":
+            return await admin.team_screen(user, session)
+        case "invite":
+            return await start.invite_screen(user, session)
+        case "settings":
+            return settings.settings_screen(user)
+    return home_screen(user)
+
+
+async def open_menu(message: Message, bot: Bot, user: User, state: FSMContext) -> None:
+    await state.clear()
+    await delete_quietly(bot, message.chat.id, message.message_id)
+    await drop_reply_keyboard(bot, message.chat.id)
+    text, markup = home_screen(user)
+    await message.answer(text, reply_markup=markup)
+
+
+@router.message(Command("menu"))
+async def cmd_menu(message: Message, bot: Bot, user: User, state: FSMContext) -> None:
+    await open_menu(message, bot, user, state)
+
+
+@router.message(F.text.in_(Menu.LEGACY))
+async def legacy_button(message: Message, bot: Bot, user: User, state: FSMContext) -> None:
+    """Кнопка прежнего меню под полем ввода: убираем его и открываем новое."""
+    await open_menu(message, bot, user, state)
+
+
+@router.callback_query(Nav.filter())
+async def on_nav(
+    call: CallbackQuery,
+    callback_data: Nav,
+    user: User,
+    session: AsyncSession,
+    settings: Settings,
+    state: FSMContext,
 ) -> None:
     await state.clear()
-    await show_report_menu(message, user, session)
-
-
-@router.message(F.text == Menu.SITE)
-async def menu_site(message: Message, user: User, session: AsyncSession, state: FSMContext) -> None:
-    await state.clear()
-    await sites.cmd_object(message, user, session)
-
-
-@router.message(F.text == Menu.ARCHIVE)
-async def menu_archive(
-    message: Message, user: User, session: AsyncSession, state: FSMContext
-) -> None:
-    await state.clear()
-    await archive.cmd_archive(message, user, session)
-
-
-@router.message(F.text == Menu.HELP)
-async def menu_help(message: Message, user: User, state: FSMContext) -> None:
-    await state.clear()
-    await start.cmd_help(message, user)
-
-
-@router.message(F.text == Menu.STATS, IsManager())
-async def menu_stats(
-    message: Message, user: User, session: AsyncSession, settings: Settings, state: FSMContext
-) -> None:
-    await state.clear()
-    await feedback.cmd_stats(message, user, session, settings)
-
-
-@router.message(F.text == Menu.SITES, IsManager())
-async def menu_sites(
-    message: Message, user: User, session: AsyncSession, state: FSMContext
-) -> None:
-    await state.clear()
-    await admin.cmd_sites(message, user, session)
-
-
-@router.message(F.text == Menu.TEAM, IsManager())
-async def menu_team(message: Message, user: User, session: AsyncSession, state: FSMContext) -> None:
-    await state.clear()
-    await admin.cmd_team(message, user, session)
-
-
-@router.message(F.text == Menu.INVITE, IsManager())
-async def menu_invite(
-    message: Message, user: User, session: AsyncSession, state: FSMContext
-) -> None:
-    await state.clear()
-    await start.cmd_invite(message, user, session)
-
-
-@router.message(F.text == Menu.SETTINGS, IsManager())
-async def menu_settings(message: Message, user: User, state: FSMContext) -> None:
-    await state.clear()
-    await settings.cmd_settings(message, user)
-
-
-@router.message(F.text.in_(Menu.MANAGER_ONLY))
-async def menu_manager_only(message: Message, user: User, state: FSMContext) -> None:
-    """Кнопка руководителя у прораба — меню осталось от прежней роли."""
-    await state.clear()
-    await message.answer(
-        "Это доступно только руководителю. Обновил меню под вашу роль.",
-        reply_markup=main_menu(user),
-    )
+    text, markup = await render(callback_data.to, user, session, settings)
+    await show(call, text, markup)
 
 
 @router.callback_query(Cancel.filter())
-async def on_cancel(call: CallbackQuery, state: FSMContext) -> None:
+async def on_cancel(
+    call: CallbackQuery, callback_data: Cancel, bot: Bot, user: User, state: FSMContext
+) -> None:
     await state.clear()
-    await call.answer("Отменено")
-    if call.message:
-        await call.message.edit_text("Отменено.")
+    if callback_data.drop and call.message is not None:
+        await call.answer("Отменено")
+        await delete_quietly(bot, call.message.chat.id, call.message.message_id)
+        return
+    text, markup = home_screen(user)
+    await show(call, text, markup)
