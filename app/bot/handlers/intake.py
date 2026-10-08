@@ -11,22 +11,24 @@ from datetime import UTC, datetime
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Filter, StateFilter
-from aiogram.types import Message, ReactionTypeEmoji
+from aiogram.types import CallbackQuery, Message, ReactionTypeEmoji
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.filters import HasCompany
 from app.bot.handlers.sites import no_sites_text
-from app.bot.keyboards import sites_keyboard
+from app.bot.keyboards import Retranscribe, sites_keyboard
 from app.config import Settings
 from app.db.models import AUDIO_KINDS, Entry, EntryKind, EntryStatus, User
 from app.db.repositories import EntryRepo, SiteRepo
 from app.timeutils import work_date_for
+from app.worker.processor import RETRANSCRIBING_TEXT
 
 log = logging.getLogger(__name__)
 
 router = Router(name="intake")
 router.message.filter(HasCompany(), StateFilter(None))
 router.edited_message.filter(HasCompany())
+router.callback_query.filter(HasCompany())
 
 # Лимит Bot API на скачивание файлов (без собственного Bot API сервера)
 MAX_DOWNLOAD_SIZE = 20 * 1024 * 1024
@@ -124,6 +126,39 @@ async def on_transcript_fix(message: Message, entry: Entry) -> None:
     entry.transcript = message.text.strip()
     entry.edited_at = datetime.now(UTC)
     await message.reply("✅ Расшифровка исправлена — в отчёт пойдёт ваш вариант.")
+
+
+@router.callback_query(Retranscribe.filter())
+async def on_retranscribe(
+    call: CallbackQuery, callback_data: Retranscribe, user: User, session: AsyncSession
+) -> None:
+    entry = await session.get(Entry, callback_data.entry_id)
+    if (
+        entry is None
+        or entry.company_id != user.company_id
+        or (entry.user_id != user.id and not user.is_manager)
+        or entry.kind not in AUDIO_KINDS
+        or entry.file_path is None
+    ):
+        await call.answer("Голосовое не найдено", show_alert=True)
+        return
+    if entry.retranscribe or entry.status != EntryStatus.DONE:
+        await call.answer("Уже распознаю — результат появится в этом сообщении")
+        return
+    # Воркер подхватит запись из очереди и разберёт её более точной моделью
+    entry.retranscribe = True
+    entry.status = EntryStatus.PENDING
+    entry.attempts = 0
+    entry.next_attempt_at = None
+    entry.locked_at = None
+    if call.message is not None:
+        entry.transcript_message_id = call.message.message_id
+    await call.answer("Распознаю заново")
+    if isinstance(call.message, Message):
+        try:
+            await call.message.edit_text(RETRANSCRIBING_TEXT)
+        except TelegramAPIError:
+            log.debug("Не удалось обновить сообщение с расшифровкой entry=%s", entry.id)
 
 
 @router.edited_message(F.text | F.caption)

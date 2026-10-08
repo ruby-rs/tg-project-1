@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import joinedload
 
 from app.db.models import Entry, EntryStatus, ReportJob
-from app.db.repositories import EntryRepo
+from app.db.repositories import EntryRepo, ReportJobRepo, ReportRepo
 from app.worker.processor import EntryProcessor
 
 log = logging.getLogger(__name__)
@@ -101,6 +101,9 @@ class EntryQueue:
             entry = await self._load(session, entry_id)
             if entry is None:
                 return
+            if entry.retranscribe:
+                await self._retranscribe(session, entry)
+                return
             try:
                 await self._processor.process(session, entry)
                 entry.status = EntryStatus.DONE
@@ -123,6 +126,43 @@ class EntryQueue:
             if message_id is not None:
                 entry.transcript_message_id = message_id
                 await session.commit()
+
+    async def _retranscribe(self, session: AsyncSession, entry: Entry) -> None:
+        """Повторный разбор по кнопке. Без повторов с бэкоффом: при сбое остаётся прежняя
+        расшифровка, а прораб может нажать кнопку ещё раз."""
+        await session.commit()  # не держим транзакцию открытой, пока идёт Whisper
+        changed: bool | None
+        try:
+            changed = await self._processor.retranscribe(entry)
+        except Exception:
+            log.exception("Ошибка повторной расшифровки entry=%s", entry.id)
+            await session.rollback()
+            reloaded = await self._load(session, entry.id)
+            if reloaded is None:
+                return
+            entry, changed = reloaded, None
+        entry.retranscribe = False
+        entry.status = EntryStatus.DONE
+        entry.error = None
+        entry.locked_at = None
+        refresh_report = (
+            changed
+            and entry.site_id is not None
+            and await ReportRepo(session).get(entry.site_id, entry.work_date) is not None
+        )
+        if refresh_report:
+            # Отчёт за этот день уже собирали — пересоберём с новой расшифровкой
+            await ReportJobRepo(session).enqueue(
+                entry.site_id, entry.work_date, entry.tg_chat_id, entry.user_id
+            )
+        await session.commit()
+
+        message_id = await self._processor.notify_retranscribed(
+            entry, changed, report_rebuild=bool(refresh_report)
+        )
+        if message_id is not None:
+            entry.transcript_message_id = message_id
+            await session.commit()
 
     async def _load(self, session: AsyncSession, entry_id: int) -> Entry | None:
         return await session.get(

@@ -1,12 +1,14 @@
 import io
 import logging
 import mimetypes
+from datetime import UTC, datetime
 from html import escape
 
 from aiogram import Bot
-from aiogram.types import Message, ReplyParameters
+from aiogram.types import InlineKeyboardMarkup, Message, ReplyParameters
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot.keyboards import transcript_keyboard
 from app.db.models import AUDIO_KINDS, Entry, EntryKind
 from app.db.repositories import EntryRepo
 from app.services.photos import PhotoDescriber, extract_taken_at
@@ -17,6 +19,12 @@ from app.timeutils import to_local
 log = logging.getLogger(__name__)
 
 TRANSCRIPT_HINT = "Если есть ошибки — ответьте на это сообщение исправленным текстом."
+RETRY_HINT = "Или нажмите «Распознать заново» — разберу точнее."
+NO_SPEECH_TEXT = (
+    "🎙 Не удалось разобрать речь. Нажмите «Распознать заново» или ответьте "
+    "на это сообщение текстом."
+)
+RETRANSCRIBING_TEXT = "🎙 Распознаю заново, более точно. Это может занять пару минут…"
 
 _DEFAULT_EXT = {
     EntryKind.VOICE: ".ogg",
@@ -37,6 +45,19 @@ def file_extension(entry: Entry) -> str:
         if guessed := mimetypes.guess_extension(entry.mime_type):
             return guessed
     return _DEFAULT_EXT.get(entry.kind, ".bin")
+
+
+def transcript_text(entry: Entry, note: str | None = None, *, with_button: bool = True) -> str:
+    """Сообщение с расшифровкой голосового (note — строка о повторном разборе)."""
+    if not entry.transcript:
+        return f"{NO_SPEECH_TEXT}\n\n{note}" if note else NO_SPEECH_TEXT
+    lines = [f"🎙 <i>{escape(entry.transcript[:3800])}</i>", ""]
+    if note:
+        lines.append(note)
+    lines.append(TRANSCRIPT_HINT)
+    if with_button:
+        lines.append(RETRY_HINT)
+    return "\n".join(lines)
 
 
 class EntryProcessor:
@@ -101,17 +122,60 @@ class EntryProcessor:
                 log.exception("Не удалось описать фото entry=%s", entry.id)
                 entry.photo_description = ""
 
+    async def retranscribe(self, entry: Entry) -> bool:
+        """Повторный разбор голосового по кнопке. True — текст изменился.
+
+        Пустой результат прежнюю расшифровку не затирает.
+        """
+        assert entry.file_path is not None
+        text = await self.transcriber.transcribe(self.storage.path(entry.file_path), accurate=True)
+        if not text or text == entry.transcript:
+            return False
+        entry.transcript = text
+        # Ручная правка относилась к прежнему тексту; новая расшифровка — новая точка отсчёта
+        entry.transcript_original = None
+        # Отчёт, собранный до повтора, устарел
+        entry.edited_at = datetime.now(UTC)
+        return True
+
     async def notify_done(self, entry: Entry) -> int | None:
         """Присылает расшифровку. Возвращает id сообщения бота, чтобы ответом на него
-        прораб мог исправить расшифровку."""
+        прораб мог исправить расшифровку, а кнопкой под ним — распознать заново."""
         if entry.kind not in AUDIO_KINDS:
             return None
-        if entry.transcript:
-            text = f"🎙 <i>{escape(entry.transcript[:3900])}</i>\n\n{TRANSCRIPT_HINT}"
+        sent = await self._reply(entry, transcript_text(entry), transcript_keyboard(entry.id))
+        return sent.message_id if sent else None
+
+    async def notify_retranscribed(
+        self, entry: Entry, changed: bool | None, *, report_rebuild: bool = False
+    ) -> int | None:
+        """Обновляет сообщение с расшифровкой после повтора (changed=None — повтор упал).
+
+        Возвращает id сообщения с расшифровкой, если пришлось отправить новое."""
+        if changed:
+            note = "🔁 Распознал заново."
+            if report_rebuild:
+                note += f" Отчёт за {entry.work_date:%d.%m} пересоберу и пришлю."
+        elif changed is None:
+            note = "⚠️ Повторно распознать не получилось — оставил прежний вариант."
         else:
-            text = "🎙 Не удалось разобрать речь — продублируйте текстом, пожалуйста."
-        sent = await self._reply(entry, text)
-        return sent.message_id if sent and entry.transcript else None
+            note = "🔁 Повторный разбор дал тот же результат."
+        # Тот же результат при повторе не изменится — кнопку оставляем только после сбоя
+        markup = transcript_keyboard(entry.id) if changed is None or not entry.transcript else None
+        text = transcript_text(entry, note, with_button=markup is not None)
+        if entry.transcript_message_id is not None:
+            try:
+                await self.bot.edit_message_text(
+                    text,
+                    chat_id=entry.tg_chat_id,
+                    message_id=entry.transcript_message_id,
+                    reply_markup=markup,
+                )
+                return None
+            except Exception:
+                log.warning("Не удалось обновить расшифровку entry=%s, шлю заново", entry.id)
+        sent = await self._reply(entry, text, markup)
+        return sent.message_id if sent else None
 
     async def notify_failed(self, entry: Entry) -> None:
         await self._reply(
@@ -123,7 +187,9 @@ class EntryProcessor:
             "но в отчёт текст не попадёт — продублируйте главное текстом.",
         )
 
-    async def _reply(self, entry: Entry, text: str) -> Message | None:
+    async def _reply(
+        self, entry: Entry, text: str, markup: InlineKeyboardMarkup | None = None
+    ) -> Message | None:
         try:
             return await self.bot.send_message(
                 entry.tg_chat_id,
@@ -131,6 +197,7 @@ class EntryProcessor:
                 reply_parameters=ReplyParameters(
                     message_id=entry.tg_message_id, allow_sending_without_reply=True
                 ),
+                reply_markup=markup,
             )
         except Exception:
             log.exception("Не удалось отправить уведомление по entry=%s", entry.id)

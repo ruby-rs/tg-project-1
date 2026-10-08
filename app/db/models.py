@@ -16,6 +16,7 @@ from sqlalchemy import (
     Text,
     Time,
     UniqueConstraint,
+    false,
     func,
     text,
 )
@@ -205,6 +206,8 @@ class Entry(Base):
     transcript_original: Mapped[str | None] = mapped_column(Text)
     # Сообщение бота с расшифровкой: ответ на него исправляет расшифровку
     transcript_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    # Прораб попросил распознать голосовое заново, более точной моделью
+    retranscribe: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     photo_description: Mapped[str | None] = mapped_column(Text)
 
     attempts: Mapped[int] = mapped_column(Integer, default=0)
