@@ -6,7 +6,13 @@ Telegram API подменён MockedSession, LLM и Whisper — фейками.
 import asyncio
 from datetime import UTC, date, datetime, timedelta
 
-from aiogram.methods import AnswerCallbackQuery, SendMessage, SendPhoto, SetMessageReaction
+from aiogram.methods import (
+    AnswerCallbackQuery,
+    EditMessageText,
+    SendMessage,
+    SendPhoto,
+    SetMessageReaction,
+)
 from sqlalchemy import select
 
 from app.bot.app import build_dispatcher
@@ -330,6 +336,95 @@ async def test_transcript_fix_by_reply_and_edited_message(
     assert text_entry.text == "Залили 11 кубов" and text_entry.edited_at is not None
     assert voice_entry.transcript == "Залили 21 куб"
     assert voice_entry.transcript_original == "Залили 12 кубов"
+
+
+async def test_retranscribe_button_updates_transcript_and_report(
+    sessionmaker, settings, bot, tg, tmp_path
+):
+    from app.bot.keyboards import Retranscribe
+
+    dp = build_dispatcher(settings, sessionmaker)
+    await register_owner_with_site(dp, bot)
+    voice = {"file_id": "voice-file", "file_unique_id": "v1", "duration": 3}
+    await dp.feed_update(bot, make_update(voice=voice))
+
+    transcriber = FakeTranscriber("Залили 12 губов")
+    worker = EntryQueue(sessionmaker, EntryProcessor(bot, LocalFileStorage(tmp_path), transcriber))
+    for entry_id in await worker.claim(10):
+        await worker.handle(entry_id)
+
+    sent = [r for r in tg.requests if isinstance(r, SendMessage)][-1]
+    button = sent.reply_markup.inline_keyboard[0][0]
+    assert button.text == "🔁 Распознать заново"
+
+    async with sessionmaker() as s:
+        entry = await s.scalar(select(Entry).where(Entry.kind == EntryKind.VOICE))
+        # Отчёт за день уже собирали — после повтора его надо пересобрать
+        s.add(
+            DailyReport(
+                site_id=entry.site_id,
+                work_date=entry.work_date,
+                data={},
+                model="m",
+                entries_count=1,
+            )
+        )
+        await s.commit()
+    message_id = entry.transcript_message_id
+    data = Retranscribe(entry_id=entry.id).pack()
+    await dp.feed_update(bot, callback_update(data, message_id=message_id))
+    assert "Распознаю заново" in tg.sent_texts()[-1]
+
+    # Повторное нажатие, пока идёт разбор, не ставит вторую задачу
+    await dp.feed_update(bot, callback_update(data, message_id=message_id))
+    answer = [r for r in tg.requests if isinstance(r, AnswerCallbackQuery)][-1]
+    assert "Уже распознаю" in answer.text
+
+    transcriber.text = "Залили 12 кубов"
+    assert await worker.claim(10) == [entry.id]
+    await worker.handle(entry.id)
+
+    async with sessionmaker() as s:
+        entry = await s.get(Entry, entry.id)
+        jobs = list(await s.scalars(select(ReportJob)))
+    assert transcriber.accurate_calls  # повтор — точной моделью
+    assert entry.transcript == "Залили 12 кубов" and not entry.retranscribe
+    assert entry.status == EntryStatus.DONE and entry.edited_at is not None
+    assert entry.transcript_message_id == message_id
+    edit = [r for r in tg.requests if isinstance(r, EditMessageText)][-1]
+    assert edit.message_id == message_id and "Залили 12 кубов" in edit.text
+    assert "пересоберу" in edit.text
+    assert len(jobs) == 1 and jobs[0].site_id == entry.site_id
+
+
+async def test_retranscribe_failure_keeps_previous_transcript(
+    sessionmaker, settings, bot, tg, tmp_path
+):
+    from app.bot.keyboards import Retranscribe
+
+    dp = build_dispatcher(settings, sessionmaker)
+    await register_owner_with_site(dp, bot)
+    voice = {"file_id": "voice-file", "file_unique_id": "v1", "duration": 3}
+    await dp.feed_update(bot, make_update(voice=voice))
+    storage = LocalFileStorage(tmp_path)
+    worker = EntryQueue(sessionmaker, EntryProcessor(bot, storage, FakeTranscriber("Залили")))
+    for entry_id in await worker.claim(10):
+        await worker.handle(entry_id)
+    async with sessionmaker() as s:
+        entry = await s.scalar(select(Entry).where(Entry.kind == EntryKind.VOICE))
+    data = Retranscribe(entry_id=entry.id).pack()
+    await dp.feed_update(bot, callback_update(data, message_id=entry.transcript_message_id))
+
+    failing = EntryQueue(sessionmaker, EntryProcessor(bot, storage, FailingTranscriber()))
+    assert await failing.claim(10) == [entry.id]
+    await failing.handle(entry.id)
+
+    async with sessionmaker() as s:
+        entry = await s.get(Entry, entry.id)
+    assert entry.transcript == "Залили" and entry.status == EntryStatus.DONE
+    assert not entry.retranscribe
+    edit = [r for r in tg.requests if isinstance(r, EditMessageText)][-1]
+    assert "оставил прежний вариант" in edit.text and edit.reply_markup is not None
 
 
 async def test_report_waits_for_unprocessed_entries(sessionmaker, settings, bot, tg):

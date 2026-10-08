@@ -111,14 +111,15 @@ class FakeTranscriber:
     def __init__(self, text: str = "Залили 12 кубов бетона в перекрытие") -> None:
         self.text = text
         self.calls: list[Path] = []
+        self.accurate_calls: list[Path] = []
 
-    async def transcribe(self, path: Path) -> str:
-        self.calls.append(path)
+    async def transcribe(self, path: Path, *, accurate: bool = False) -> str:
+        (self.accurate_calls if accurate else self.calls).append(path)
         return self.text
 
 
 class FailingTranscriber:
-    async def transcribe(self, path: Path) -> str:
+    async def transcribe(self, path: Path, *, accurate: bool = False) -> str:
         raise ConnectionError("whisper недоступен")
 
 
@@ -138,7 +139,7 @@ def make_update(user_id: int = TG_USER_ID, **message_fields: Any) -> Update:
     return Update.model_validate({"update_id": message_id, "message": message})
 
 
-def callback_update(data: str, user_id: int = TG_USER_ID) -> Update:
+def callback_update(data: str, user_id: int = TG_USER_ID, message_id: int = 1) -> Update:
     update_id = next(msg_ids)
     return Update.model_validate(
         {
@@ -149,7 +150,7 @@ def callback_update(data: str, user_id: int = TG_USER_ID) -> Update:
                 "data": data,
                 "from": {"id": user_id, "is_bot": False, "first_name": "Иван"},
                 "message": {
-                    "message_id": 1,
+                    "message_id": message_id,
                     "date": int(datetime.now(UTC).timestamp()),
                     "chat": {"id": user_id, "type": "private"},
                     "text": "Выберите объект:",

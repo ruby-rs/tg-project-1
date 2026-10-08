@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     whisper_language: str = "ru"
     # 5 — точнее, 1 — примерно вдвое быстрее на слабом процессоре
     whisper_beam_size: int = Field(default=5, ge=1, le=10)
+    # Модель для кнопки «Распознать заново» (local: например large-v3; api: имя модели).
+    # Пусто — та же модель, но с более тщательным перебором вариантов
+    whisper_retry_model: str | None = None
     # Выгрузить модель из памяти после стольких секунд без голосовых (0 — не выгружать)
     whisper_unload_after: int = Field(default=600, ge=0)
 
@@ -72,6 +75,7 @@ class Settings(BaseSettings):
     def _empty_to_none(self) -> "Settings":
         for name in (
             "whisper_api_base_url",
+            "whisper_retry_model",
             "llm_base_url",
             "llm_project",
             "llm_vision_model",

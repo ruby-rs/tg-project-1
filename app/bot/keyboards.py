@@ -154,6 +154,18 @@ def sites_keyboard(
     return kb.as_markup()
 
 
+class Retranscribe(CallbackData, prefix="rt"):
+    """Распознать голосовое заново, более точной моделью."""
+
+    entry_id: int
+
+
+def transcript_keyboard(entry_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔁 Распознать заново", callback_data=Retranscribe(entry_id=entry_id))
+    return kb.as_markup()
+
+
 class ReportMenu(CallbackData, prefix="rm"):
     """Выбор отчёта кнопками: site_id=0 — список объектов, иначе — выбор дня."""
 

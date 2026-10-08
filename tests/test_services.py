@@ -162,8 +162,11 @@ def test_sentry_is_off_without_dsn(settings, monkeypatch):
 
 
 class FakeWhisperModel:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
     def transcribe(self, path, **kw):
-        assert kw["beam_size"] == 1
+        self.calls.append(kw)
         segment = SimpleNamespace(text=" Залили бетон ")
         return [segment], None
 
@@ -191,3 +194,36 @@ async def test_local_whisper_loads_lazily_and_unloads_when_idle(tmp_path):
     assert not whisper.loaded  # простой — модель выгружена
     await whisper.transcribe(tmp_path / "c.ogg")
     assert loads == [1, 1]
+
+
+async def test_local_whisper_accurate_pass_searches_wider(tmp_path):
+    from app.services.transcription import CONSTRUCTION_PROMPT, LocalWhisperTranscriber
+
+    model = FakeWhisperModel()
+    whisper = LocalWhisperTranscriber(
+        "small", "cpu", "int8", "ru", beam_size=5, unload_after=0, model_factory=lambda: model
+    )
+    await whisper.transcribe(tmp_path / "a.ogg")
+    await whisper.transcribe(tmp_path / "a.ogg", accurate=True)
+    normal, accurate = model.calls
+    assert normal["language"] == "ru" and normal["initial_prompt"] == CONSTRUCTION_PROMPT
+    assert normal["beam_size"] == 5 and normal["condition_on_previous_text"] is False
+    assert accurate["beam_size"] > normal["beam_size"]
+    assert accurate["vad_parameters"]["threshold"] < 0.5  # тихую речь не отбрасываем
+
+
+def test_build_transcriber_uses_retry_model_for_accurate_pass(settings):
+    from app.config import TranscriberBackend
+    from app.services.transcription import (
+        LocalWhisperTranscriber,
+        TwoModelTranscriber,
+        build_transcriber,
+    )
+
+    settings.transcriber = TranscriberBackend.LOCAL
+    assert isinstance(build_transcriber(settings), LocalWhisperTranscriber)
+    settings.whisper_retry_model = "large-v3"
+    two = build_transcriber(settings)
+    assert isinstance(two, TwoModelTranscriber)
+    assert two._accurate._model_size == "large-v3"
+    assert two._main._model_size == settings.whisper_local_model

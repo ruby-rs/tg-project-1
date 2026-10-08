@@ -23,8 +23,8 @@ dependencies = [
 
 [project.optional-dependencies]
 # Локальная расшифровка голосовых без внешних API
-# PyAV 19 убрал параметр metadata_errors, на котором падает чтение аудио в faster-whisper
-local-whisper = ["faster-whisper>=1.0", "av>=11,<19"]
+# 1.1 — модель large-v3-turbo; PyAV 19 убрал параметр metadata_errors, на котором падает чтение аудио в faster-whisper
+local-whisper = ["faster-whisper>=1.1", "av>=11,<19"]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6"]
 
 [tool.setuptools.packages.find]
