@@ -12,10 +12,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.bot.filters import HasCompany
 from app.bot.handlers.sites import no_sites_text
 from app.bot.keyboards import (
+    ReportMedia,
+    ReportMenu,
     ReportRebuild,
     ReportSite,
     ReportView,
     feedback_keyboard,
+    main_menu,
+    report_days_keyboard,
+    report_pick_site_keyboard,
     report_sites_keyboard,
 )
 from app.config import Settings
@@ -23,6 +28,7 @@ from app.db.models import Site, User
 from app.db.repositories import EntryRepo, ReportJobRepo, ReportRepo, SiteRepo
 from app.reports.render import render_report, split_message
 from app.reports.schema import SiteDailyReport
+from app.services.media import collect_media, send_media_collection
 from app.timeutils import today_for
 
 router = Router(name="reports")
@@ -78,7 +84,59 @@ async def enqueue_report(
         text = f"🔄 Пересобираю отчёт {what}. Пришлю сюда, как будет готов."
     else:
         text = f"⏳ Формирую отчёт {what}. Пришлю сюда, как будет готов."
-    await bot.send_message(chat_id, text)
+    # Заодно обновляем меню под полем ввода (у старых пользователей его могло не быть)
+    await bot.send_message(chat_id, text, reply_markup=main_menu(user))
+
+
+PICK_SITE_PROMPT = "📋 По какому объекту отчёт?"
+
+
+def _days_prompt(site: Site) -> str:
+    return f"📋 Отчёт по «{escape(site.name)}» — за какой день?"
+
+
+async def show_report_menu(message: Message, user: User, session: AsyncSession) -> None:
+    """Кнопка «📋 Отчёт»: объект (если их несколько) → день → отчёт."""
+    repo = SiteRepo(session)
+    sites = await repo.list_for_user(user)
+    if not sites:
+        await message.answer(no_sites_text(user))
+        return
+    current = next((s for s in sites if s.id == user.current_site_id), None)
+    if len(sites) == 1 or (current is not None and not user.is_manager):
+        site = current or sites[0]
+        await message.answer(
+            _days_prompt(site),
+            reply_markup=report_days_keyboard(site.id, can_switch=len(sites) > 1),
+        )
+        return
+    await message.answer(
+        "📋 По какому объекту отчёт?", reply_markup=report_pick_site_keyboard(sites)
+    )
+
+
+@router.callback_query(ReportMenu.filter())
+async def on_report_menu(
+    call: CallbackQuery, callback_data: ReportMenu, user: User, session: AsyncSession
+) -> None:
+    repo = SiteRepo(session)
+    await call.answer()
+    if call.message is None:
+        return
+    if callback_data.site_id == 0:
+        sites = await repo.list_for_user(user)
+        await call.message.edit_text(
+            PICK_SITE_PROMPT, reply_markup=report_pick_site_keyboard(sites)
+        )
+        return
+    site = await repo.get_for_user(user, callback_data.site_id)
+    if site is None:
+        await call.message.edit_text("Объект не найден.")
+        return
+    can_switch = len(await repo.list_for_user(user)) > 1
+    await call.message.edit_text(
+        _days_prompt(site), reply_markup=report_days_keyboard(site.id, can_switch=can_switch)
+    )
 
 
 @router.message(Command("report"))
@@ -138,6 +196,7 @@ async def on_report_view(
         await call.answer("Отчёт не найден", show_alert=True)
         return
     entries = await EntryRepo(session).for_report(site.id, work_date)
+    media_count = collect_media(entries).total
     text = render_report(
         SiteDailyReport.model_validate(saved.data),
         site.name,
@@ -149,8 +208,27 @@ async def on_report_view(
     chunks = split_message(text)
     for i, chunk in enumerate(chunks):
         last = i == len(chunks) - 1
-        markup = feedback_keyboard(site.id, work_date) if last else None
+        markup = feedback_keyboard(site.id, work_date, media_count) if last else None
         await bot.send_message(chat_id, chunk, reply_markup=markup)
+
+
+@router.callback_query(ReportMedia.filter())
+async def on_report_media(
+    call: CallbackQuery, callback_data: ReportMedia, bot: Bot, user: User, session: AsyncSession
+) -> None:
+    """Фото, видео и файлы прорабов за день — альбомами, по кнопке под отчётом."""
+    site = await SiteRepo(session).get_for_user(user, callback_data.site_id)
+    if site is None:
+        await call.answer("Объект не найден", show_alert=True)
+        return
+    work_date = date.fromordinal(callback_data.day)
+    entries = await EntryRepo(session).for_report(site.id, work_date)
+    if not collect_media(entries).total:
+        await call.answer("Фото и видео за этот день нет", show_alert=True)
+        return
+    await call.answer("Присылаю медиа…")
+    chat_id = call.message.chat.id if call.message else call.from_user.id
+    await send_media_collection(bot, chat_id, entries, site.name, work_date, user.company.timezone)
 
 
 @router.callback_query(ReportRebuild.filter())

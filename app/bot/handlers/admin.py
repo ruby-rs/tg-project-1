@@ -5,9 +5,8 @@ from html import escape
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
-from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, ReplyKeyboardRemove
 from aiogram.utils.deep_linking import create_start_link
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +14,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.bot.commands import sync_user_commands
 from app.bot.filters import IsManager
 from app.bot.handlers.start import SITE_INVITE_PREFIX
+from app.bot.keyboards import (
+    NewSite,
+    SiteAdmin,
+    TeamAdmin,
+    cancel_keyboard,
+    invite_keyboard,
+    main_menu,
+)
 from app.bot.states import SiteEdit
 from app.db.models import Site, User, UserRole
 from app.db.repositories import SiteRepo, UserRepo
@@ -33,20 +40,9 @@ ROLE_TITLES = {
 ROLE_ICONS = {UserRole.OWNER: "👑", UserRole.MANAGER: "🧑‍💼", UserRole.FOREMAN: "👷"}
 
 
-class SiteAdmin(CallbackData, prefix="sa"):
-    action: str  # list | card | rename | address | invite | members | kick | close | open
-    site_id: int = 0
-    user_id: int = 0
-
-
-class TeamAdmin(CallbackData, prefix="ta"):
-    action: str  # list | card | promote | demote | remove | remove_ok
-    user_id: int = 0
-
-
-async def _notify(bot: Bot, user: User, text: str) -> None:
+async def _notify(bot: Bot, user: User, text: str, markup=None) -> None:
     try:
-        await bot.send_message(user.tg_id, text)
+        await bot.send_message(user.tg_id, text, reply_markup=markup)
     except Exception:
         log.info("Не удалось уведомить пользователя %s", user.id)
 
@@ -69,6 +65,7 @@ def _sites_list_markup(sites: list[Site]) -> InlineKeyboardMarkup:
             text=f"{icon} {site.name}{suffix}",
             callback_data=SiteAdmin(action="card", site_id=site.id),
         )
+    kb.button(text="➕ Новый объект", callback_data=NewSite())
     kb.adjust(1)
     return kb.as_markup()
 
@@ -105,10 +102,8 @@ async def _site_card(session: AsyncSession, site: Site) -> tuple[str, InlineKeyb
 @router.message(Command("sites"))
 async def cmd_sites(message: Message, user: User, session: AsyncSession) -> None:
     sites = await SiteRepo(session).list_all(user.company_id)
-    if not sites:
-        await message.answer("Объектов пока нет. Добавьте первый: /new_object")
-        return
-    await message.answer("Управление объектами:", reply_markup=_sites_list_markup(sites))
+    text = "Управление объектами:" if sites else "Объектов пока нет. Добавьте первый:"
+    await message.answer(text, reply_markup=_sites_list_markup(sites))
 
 
 @router.callback_query(SiteAdmin.filter(F.action == "list"))
@@ -138,12 +133,12 @@ async def on_site_action(
         await state.update_data(site_id=site.id)
         await call.answer()
         prompt = (
-            "Введите новое название объекта:"
+            "Напишите новое название объекта:"
             if action == "rename"
-            else "Введите адрес объекта (или «-», чтобы удалить):"
+            else "Напишите адрес объекта (или «-», чтобы удалить):"
         )
         if call.message:
-            await call.message.answer(prompt + "\nОтменить — /cancel")
+            await call.message.answer(prompt, reply_markup=cancel_keyboard())
         return
 
     if action == "invite":
@@ -198,7 +193,9 @@ async def on_site_rename(
         return
     duplicate = await repo.get_by_name(user.company_id, name)
     if duplicate is not None and duplicate.id != site.id:
-        await message.answer("Объект с таким названием уже есть. Введите другое.")
+        await message.answer(
+            "Объект с таким названием уже есть. Введите другое.", reply_markup=cancel_keyboard()
+        )
         return
     site.name = name
     await state.clear()
@@ -233,8 +230,12 @@ def _team_list_markup(users: list[User]) -> InlineKeyboardMarkup:
             text=f"{ROLE_ICONS.get(u.role, '')} {u.full_name} — {ROLE_TITLES.get(u.role, u.role)}",
             callback_data=TeamAdmin(action="card", user_id=u.id),
         )
+    kb.button(text="🔗 Пригласить прораба", callback_data=TeamAdmin(action="invite"))
     kb.adjust(1)
     return kb.as_markup()
+
+
+TEAM_TITLE = "👥 Команда компании:"
 
 
 def _can_manage(actor: User, target: User) -> bool:
@@ -281,17 +282,24 @@ async def _member_card(
 @router.message(Command("team"))
 async def cmd_team(message: Message, user: User, session: AsyncSession) -> None:
     users = await UserRepo(session).list_company(user.company_id)
-    await message.answer(
-        "Команда компании. Пригласить прораба — /invite", reply_markup=_team_list_markup(users)
-    )
+    await message.answer(TEAM_TITLE, reply_markup=_team_list_markup(users))
 
 
 @router.callback_query(TeamAdmin.filter(F.action == "list"))
 async def on_team_list(call: CallbackQuery, user: User, session: AsyncSession) -> None:
     users = await UserRepo(session).list_company(user.company_id)
-    await _edit_or_answer(
-        call, "Команда компании. Пригласить прораба — /invite", _team_list_markup(users)
-    )
+    await _edit_or_answer(call, TEAM_TITLE, _team_list_markup(users))
+
+
+@router.callback_query(TeamAdmin.filter(F.action == "invite"))
+async def on_team_invite(call: CallbackQuery, user: User, session: AsyncSession) -> None:
+    sites = await SiteRepo(session).list_for_user(user)
+    await call.answer()
+    if call.message:
+        await call.message.answer(
+            "Куда пригласить прораба? Ссылка на объект сразу даёт доступ к нему.",
+            reply_markup=invite_keyboard(sites),
+        )
 
 
 @router.callback_query(TeamAdmin.filter())
@@ -319,7 +327,8 @@ async def on_team_action(
         await _notify(
             bot,
             target,
-            f"Ваша роль в компании «{company_name}»: {ROLE_TITLES[target.role]}.",
+            f"Ваша роль в компании «{company_name}»: {ROLE_TITLES[target.role]}. Меню обновлено.",
+            main_menu(target),
         )
     elif action == "remove":
         kb = InlineKeyboardBuilder()
@@ -339,7 +348,9 @@ async def on_team_action(
         name = escape(target.full_name)
         await users.remove_from_company(target)
         await sync_user_commands(bot, target)
-        await _notify(bot, target, f"Вас удалили из компании «{company_name}».")
+        await _notify(
+            bot, target, f"Вас удалили из компании «{company_name}».", ReplyKeyboardRemove()
+        )
         remaining = await users.list_company(user.company_id)
         await _edit_or_answer(call, f"✅ {name} удалён из компании.", _team_list_markup(remaining))
         return
