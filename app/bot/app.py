@@ -7,11 +7,12 @@ from aiogram.fsm.storage.base import BaseStorage
 from aiogram.fsm.storage.memory import MemoryStorage
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.bot.commands import set_default_commands, sync_all_managers
+from app.bot.commands import set_default_commands, set_superadmin_commands, sync_all_managers
 from app.bot.handlers import get_routers
-from app.bot.middlewares import DbSessionMiddleware, UserMiddleware
+from app.bot.middlewares import AccessGateMiddleware, DbSessionMiddleware, UserMiddleware
 from app.config import Settings
 from app.db.session import create_engine, create_sessionmaker
+from app.services.service_state import ServiceStateCache
 
 log = logging.getLogger(__name__)
 
@@ -32,9 +33,16 @@ def build_dispatcher(
     sessionmaker: async_sessionmaker[AsyncSession],
     storage: BaseStorage | None = None,
 ) -> Dispatcher:
-    dp = Dispatcher(storage=storage or MemoryStorage(), settings=settings)
+    service_state = ServiceStateCache(sessionmaker)
+    dp = Dispatcher(
+        storage=storage or MemoryStorage(), settings=settings, service_state=service_state
+    )
     dp.update.outer_middleware(DbSessionMiddleware(sessionmaker))
     dp.update.outer_middleware(UserMiddleware())
+    # Остановка бота и отключённые компании — до любых хендлеров, включая согласие
+    gate = AccessGateMiddleware(service_state, settings)
+    for observer in (dp.message, dp.edited_message, dp.callback_query):
+        observer.outer_middleware(gate)
     dp.include_routers(*get_routers())
     return dp
 
@@ -51,6 +59,7 @@ async def run_bot(settings: Settings) -> None:
     try:
         await set_default_commands(bot)
         await sync_all_managers(bot, sessionmaker)
+        await set_superadmin_commands(bot, settings.superadmins)
         await bot.delete_webhook(drop_pending_updates=False)
         me = await bot.get_me()
         log.info("Бот @%s запущен", me.username)

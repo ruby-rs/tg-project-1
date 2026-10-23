@@ -37,19 +37,45 @@ class JobQueue(Protocol):
     async def handle(self, job_id: int) -> None: ...
 
 
+class PauseGate(Protocol):
+    async def paused(self) -> bool: ...
+
+
+async def is_paused(gate: PauseGate | None, name: str) -> bool:
+    """Бот остановлен главным администратором — новые задачи не берём."""
+    if gate is None:
+        return False
+    try:
+        return await gate.paused()
+    except Exception:
+        log.exception("Не удалось проверить, остановлен ли бот (%s)", name)
+        return False
+
+
 async def run_queue(
-    queue: JobQueue, stop: asyncio.Event, *, concurrency: int, poll_interval: float
+    queue: JobQueue,
+    stop: asyncio.Event,
+    *,
+    concurrency: int,
+    poll_interval: float,
+    gate: PauseGate | None = None,
 ) -> None:
     """Очередь поверх таблицы БД (SELECT ... FOR UPDATE SKIP LOCKED).
 
     Без Redis/брокера: задачи переживают рестарт, можно поднять несколько воркеров.
+    Пока бот остановлен (gate), новые задачи не берутся; начатые доделываются.
     """
     log.info("Очередь %s запущена, параллельность %d", queue.name, concurrency)
     tasks: set[asyncio.Task[None]] = set()
+    was_paused = False
     while not stop.is_set():
         free = concurrency - len(tasks)
         ids: list[int] = []
-        if free > 0:
+        paused = await is_paused(gate, queue.name)
+        if paused != was_paused:
+            log.info("Очередь %s %s", queue.name, "на паузе" if paused else "снова работает")
+            was_paused = paused
+        if free > 0 and not paused:
             try:
                 ids = await queue.claim(free)
             except Exception:

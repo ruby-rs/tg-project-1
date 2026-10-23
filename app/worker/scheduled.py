@@ -29,7 +29,7 @@ from app.reports.digest import Digest, SiteDigest, render_digest
 from app.reports.render import split_message
 from app.services.reports import ReportService
 from app.timeutils import work_date_for
-from app.worker.runner import mark_failed_attempt
+from app.worker.runner import PauseGate, is_paused, mark_failed_attempt
 
 log = logging.getLogger(__name__)
 
@@ -70,7 +70,8 @@ async def schedule_due_runs(
 ) -> int:
     created = 0
     runs = ScheduledRunRepo(session)
-    for company in await session.scalars(select(Company)):
+    # Отключённым главным администратором компаниям не рассылаем
+    for company in await session.scalars(select(Company).where(Company.disabled_at.is_(None))):
         today = work_date_for(now_utc, company.timezone, day_start_hour)
         for kind in due_kinds(company, now_utc):
             if await runs.create(company.id, kind, today):
@@ -85,13 +86,17 @@ async def run_scheduler(
     *,
     interval: float = 60,
     day_start_hour: int = 0,
+    gate: PauseGate | None = None,
 ) -> None:
     log.info("Планировщик рассылок запущен")
     while not stop.is_set():
         try:
-            async with sessionmaker() as session:
-                await schedule_due_runs(session, datetime.now(UTC), day_start_hour)
-                await session.commit()
+            # Пока бот остановлен, рассылки не создаём; после запуска уйдут те,
+            # чьё время ещё в пределах CATCH_UP_WINDOW
+            if not await is_paused(gate, "scheduler"):
+                async with sessionmaker() as session:
+                    await schedule_due_runs(session, datetime.now(UTC), day_start_hour)
+                    await session.commit()
         except Exception:
             log.exception("Ошибка планировщика рассылок")
         try:
@@ -132,7 +137,9 @@ class ScheduledQueue:
             if run is None:
                 return
             try:
-                if run.kind == ScheduledKind.REMINDER:
+                if run.company.disabled_at is not None:
+                    pass  # компанию отключили после того, как рассылку запланировали
+                elif run.kind == ScheduledKind.REMINDER:
                     await self._remind(session, run)
                 elif not await self._digest(session, run):
                     return  # отложено: ждём расшифровку голосовых

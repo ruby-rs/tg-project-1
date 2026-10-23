@@ -42,3 +42,16 @@ async def sync_all_managers(bot: Bot, sessionmaker: async_sessionmaker[AsyncSess
         )
         for user in managers:
             await sync_user_commands(bot, user)
+
+
+ADMIN_COMMANDS = [*MENU_COMMANDS, BotCommand(command="admin", description="Панель администратора")]
+
+
+async def set_superadmin_commands(bot: Bot, superadmins: frozenset[int]) -> None:
+    """Главным администраторам — ещё и /admin в списке команд."""
+    for tg_id in superadmins:
+        try:
+            await bot.set_my_commands(ADMIN_COMMANDS, scope=BotCommandScopeChat(chat_id=tg_id))
+        except TelegramAPIError:
+            # Администратор ещё не открывал бота — /admin всё равно сработает
+            log.info("Не удалось задать команды администратору %s", tg_id)

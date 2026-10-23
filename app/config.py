@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     sentry_dsn: str | None = None
     sentry_environment: str = "production"
 
+    # Главные администраторы сервиса — Telegram ID через запятую. Им доступна панель /admin:
+    # активность объектов всех компаний, отключение компаний и объектов, остановка бота
+    superadmin_ids: str = ""
+
     # --- Персональные данные (152-ФЗ) ---
     # Оператор ПДн для текста согласия, например «ООО Ромашка, ИНН 7700000000, г. Москва, ...»
     pd_operator: str | None = None
@@ -87,7 +91,16 @@ class Settings(BaseSettings):
         ):
             if getattr(self, name) == "":
                 setattr(self, name, None)
+        try:
+            self.superadmins  # noqa: B018 — проверяем формат при запуске, а не при первом /admin
+        except ValueError as exc:
+            raise ValueError("SUPERADMIN_IDS: укажите Telegram ID числами через запятую") from exc
         return self
+
+    @property
+    def superadmins(self) -> frozenset[int]:
+        parts = self.superadmin_ids.replace(";", ",").replace(" ", ",").split(",")
+        return frozenset(int(p) for p in parts if p.strip())
 
     @property
     def effective_whisper_api_key(self) -> str:
