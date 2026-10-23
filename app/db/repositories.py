@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy import Select, and_, case, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -16,12 +16,14 @@ from app.db.models import (
     ReportFeedback,
     ReportJob,
     ScheduledRun,
+    ServiceState,
     Site,
     SiteMember,
     User,
     UserRole,
     new_invite_code,
 )
+from app.timeutils import work_date_for
 
 
 class UserRepo:
@@ -646,3 +648,191 @@ class StatsRepo:
             comments=comments,
             activity=activity,
         )
+
+
+class ServiceStateRepo:
+    """Остановка всего бота главным администратором."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def get(self) -> ServiceState:
+        state = await self.session.get(ServiceState, 1, populate_existing=True)
+        if state is None:
+            # Строку создаёт миграция; на случай пустой БД (тесты, ручная очистка)
+            await self.session.execute(
+                pg_insert(ServiceState).values(id=1).on_conflict_do_nothing()
+            )
+            state = await self.session.get(ServiceState, 1)
+        return state
+
+    async def is_paused(self) -> bool:
+        paused_at = await self.session.scalar(
+            select(ServiceState.paused_at).where(ServiceState.id == 1)
+        )
+        return paused_at is not None
+
+    async def pause(self, by_tg_id: int) -> None:
+        state = await self.get()
+        if state.paused_at is None:
+            state.paused_at = datetime.now(UTC)
+            state.paused_by = by_tg_id
+
+    async def resume(self) -> None:
+        state = await self.get()
+        state.paused_at = None
+        state.paused_by = None
+
+
+# Объект без сообщений столько дней и больше считается неактивным
+INACTIVE_DAYS = 3
+
+
+@dataclass(slots=True)
+class SiteActivity:
+    site: Site
+    today: date  # текущий рабочий день в часовом поясе компании
+    last_date: date | None  # последний день, когда были сообщения
+    today_count: int
+    week_count: int  # за 7 дней, включая сегодня
+
+    @property
+    def idle_days(self) -> int | None:
+        return None if self.last_date is None else (self.today - self.last_date).days
+
+    @property
+    def is_inactive(self) -> bool:
+        idle = self.idle_days
+        return idle is None or idle >= INACTIVE_DAYS
+
+
+@dataclass(slots=True)
+class CompanyActivity:
+    company: Company
+    users: int
+    sites: list[SiteActivity]
+
+    @property
+    def open_sites(self) -> list[SiteActivity]:
+        return [s for s in self.sites if s.site.is_active]
+
+
+@dataclass(slots=True)
+class QueueStats:
+    entries_waiting: int
+    entries_failed_week: int
+    reports_waiting: int
+
+
+class PlatformRepo:
+    """Данные для главного администратора — по всем компаниям сразу."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def companies(self) -> list[Company]:
+        return list(
+            await self.session.scalars(
+                select(Company).order_by(Company.disabled_at.is_not(None), Company.name)
+            )
+        )
+
+    async def activity(
+        self, now: datetime, day_start_hour: int = 0, company_id: int | None = None
+    ) -> list[CompanyActivity]:
+        """Активность объектов: когда были последние сообщения и сколько их за неделю."""
+        companies_q = select(Company).order_by(Company.disabled_at.is_not(None), Company.name)
+        sites_q = select(Site).order_by(Site.name)
+        if company_id is not None:
+            companies_q = companies_q.where(Company.id == company_id)
+            sites_q = sites_q.where(Site.company_id == company_id)
+        companies = list(await self.session.scalars(companies_q))
+        if not companies:
+            return []
+        sites = list(await self.session.scalars(sites_q))
+        site_ids = [s.id for s in sites]
+
+        last_dates: dict[int, date] = {}
+        daily: dict[int, dict[date, int]] = {}
+        if site_ids:
+            last_dates = dict(
+                (
+                    await self.session.execute(
+                        select(Entry.site_id, func.max(Entry.work_date))
+                        .where(Entry.site_id.in_(site_ids))
+                        .group_by(Entry.site_id)
+                    )
+                ).all()
+            )
+            # С запасом в день: «сегодня» у компаний в разных часовых поясах разное
+            since = now.date() - timedelta(days=8)
+            for site_id, work_date, n in (
+                await self.session.execute(
+                    select(Entry.site_id, Entry.work_date, func.count())
+                    .where(Entry.site_id.in_(site_ids), Entry.work_date >= since)
+                    .group_by(Entry.site_id, Entry.work_date)
+                )
+            ).all():
+                daily.setdefault(site_id, {})[work_date] = n
+
+        users = dict(
+            (
+                await self.session.execute(
+                    select(User.company_id, func.count())
+                    .where(User.company_id.in_([c.id for c in companies]))
+                    .group_by(User.company_id)
+                )
+            ).all()
+        )
+
+        by_company: dict[int, list[Site]] = {}
+        for site in sites:
+            by_company.setdefault(site.company_id, []).append(site)
+        result = []
+        for company in companies:
+            today = work_date_for(now, company.timezone, day_start_hour)
+            week_start = today - timedelta(days=6)
+            activities = []
+            for site in by_company.get(company.id, []):
+                days = daily.get(site.id, {})
+                activities.append(
+                    SiteActivity(
+                        site=site,
+                        today=today,
+                        last_date=last_dates.get(site.id),
+                        today_count=days.get(today, 0),
+                        week_count=sum(n for d, n in days.items() if week_start <= d <= today),
+                    )
+                )
+            result.append(CompanyActivity(company, users.get(company.id, 0), activities))
+        return result
+
+    async def queues(self) -> QueueStats:
+        week_ago = datetime.now(UTC) - timedelta(days=7)
+        waiting, failed = (
+            await self.session.execute(
+                select(
+                    func.count().filter(
+                        Entry.status.in_([EntryStatus.PENDING, EntryStatus.PROCESSING])
+                    ),
+                    func.count().filter(
+                        Entry.status == EntryStatus.FAILED, Entry.created_at >= week_ago
+                    ),
+                )
+            )
+        ).one()
+        reports = await self.session.scalar(
+            select(func.count()).where(
+                ReportJob.status.in_([EntryStatus.PENDING, EntryStatus.PROCESSING])
+            )
+        )
+        return QueueStats(waiting, failed, reports or 0)
+
+    async def get_company(self, company_id: int) -> Company | None:
+        return await self.session.get(Company, company_id)
+
+    async def get_site(self, site_id: int) -> Site | None:
+        return await self.session.get(Site, site_id, options=[joinedload(Site.company)])
+
+    async def set_company_enabled(self, company: Company, enabled: bool) -> None:
+        company.disabled_at = None if enabled else (company.disabled_at or datetime.now(UTC))

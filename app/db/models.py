@@ -95,6 +95,9 @@ class Company(Base):
     work_days: Mapped[str] = mapped_column(
         String(7), default=DEFAULT_WORK_DAYS, server_default=DEFAULT_WORK_DAYS
     )
+    # Главный администратор отключил компанию: её пользователи не могут работать с ботом,
+    # сводки и напоминания не рассылаются. None — компания работает
+    disabled_at: Mapped[datetime | None]
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
     sites: Mapped[list["Site"]] = relationship(back_populates="company")
@@ -344,3 +347,17 @@ class DailyReport(Base):
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 
     site: Mapped[Site] = relationship()
+
+
+class ServiceState(Base):
+    """Состояние всего сервиса — одна строка (id = 1).
+
+    Главный администратор может остановить бота целиком: пока paused_at задано, бот
+    не принимает сообщения пользователей, а воркер не берёт задачи из очередей.
+    """
+
+    __tablename__ = "service_state"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    paused_at: Mapped[datetime | None]
+    paused_by: Mapped[int | None] = mapped_column(BigInteger)  # Telegram ID администратора

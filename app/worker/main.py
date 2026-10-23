@@ -11,6 +11,7 @@ from app.db.session import create_engine, create_sessionmaker
 from app.services.llm import LLMClient
 from app.services.photos import PhotoDescriber
 from app.services.reports import ReportService
+from app.services.service_state import ServiceStateCache
 from app.services.storage import LocalFileStorage
 from app.services.transcription import build_transcriber
 from app.worker.exports import ExportQueue
@@ -49,6 +50,9 @@ async def run_worker(settings: Settings) -> None:
     scheduled = ScheduledQueue(sessionmaker, bot, report_service)
     exports = ExportQueue(sessionmaker, bot, storage)
 
+    # Главный администратор может остановить бота: тогда очереди не берут новые задачи
+    gate = ServiceStateCache(sessionmaker)
+
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -62,19 +66,23 @@ async def run_worker(settings: Settings) -> None:
                 stop,
                 concurrency=settings.worker_concurrency,
                 poll_interval=settings.worker_poll_interval,
+                gate=gate,
             ),
             run_queue(
                 reports,
                 stop,
                 concurrency=settings.report_concurrency,
                 poll_interval=settings.worker_poll_interval,
+                gate=gate,
             ),
             # Вечерние сводки и напоминания: по одной рассылке за раз
             # Редкие очереди опрашиваем реже, чтобы не нагружать БД впустую
-            run_queue(scheduled, stop, concurrency=1, poll_interval=10),
+            run_queue(scheduled, stop, concurrency=1, poll_interval=10, gate=gate),
             # Выгрузка архива нагружает диск — по одной за раз
-            run_queue(exports, stop, concurrency=1, poll_interval=5),
-            run_scheduler(sessionmaker, stop, day_start_hour=settings.work_day_start_hour),
+            run_queue(exports, stop, concurrency=1, poll_interval=5, gate=gate),
+            run_scheduler(
+                sessionmaker, stop, day_start_hour=settings.work_day_start_hour, gate=gate
+            ),
         )
     finally:
         await bot.session.close()
